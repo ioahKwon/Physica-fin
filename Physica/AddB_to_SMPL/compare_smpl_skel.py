@@ -413,6 +413,64 @@ def estimate_skel_beta(subject_info: Dict, body_proportions: Dict, gender: str,
     return betas
 
 
+def estimate_skel_beta_anthropometric(
+    height_m: float,
+    shoulder_width_m: float,
+    gender: str,
+    device: torch.device
+) -> torch.Tensor:
+    """
+    Estimate SKEL beta using Physica GitHub anthropometric formulas.
+
+    This is a simpler initialization based on external anthropometric data
+    rather than derived from motion capture joint positions.
+
+    Based on Physica repository: scale_estimation.py, estimate_from_height_width()
+
+    Args:
+        height_m: Subject height in meters
+        shoulder_width_m: Shoulder width in meters
+        gender: 'male' or 'female'
+        device: torch device
+
+    Returns:
+        betas: [10] tensor of estimated beta values
+    """
+    betas = torch.zeros(SKEL_NUM_BETAS, device=device)
+
+    # Baseline values from Physica GitHub (slightly different from SKEL_BASELINE)
+    if gender == 'male':
+        baseline_height = 1.58  # meters
+        baseline_shoulder = 0.35  # meters
+    else:
+        baseline_height = 1.52  # meters
+        baseline_shoulder = 0.32  # meters
+
+    # Compute ratios
+    height_ratio = height_m / baseline_height
+    shoulder_ratio = shoulder_width_m / baseline_shoulder
+
+    # Empirical formulas from Physica GitHub
+    # Beta[0] primarily affects height
+    # Beta[1] affects shoulder width
+    beta0 = -3.5 * (height_ratio - 1.0)  # Height adjustment
+    beta1 = 2.0 * (shoulder_ratio - 1.0)   # Shoulder adjustment
+
+    betas[0] = beta0
+    betas[1] = beta1
+
+    # Clamp to reasonable range
+    betas = torch.clamp(betas, -5.0, 5.0)
+
+    print(f"  Estimated SKEL betas (ANTHROPOMETRIC - Physica GitHub style):")
+    print(f"    Input: height={height_m:.3f}m, shoulder={shoulder_width_m:.3f}m")
+    print(f"    Baseline ({gender}): height={baseline_height}m, shoulder={baseline_shoulder}m")
+    print(f"    Ratios: height={height_ratio:.3f}, shoulder={shoulder_ratio:.3f}")
+    print(f"    Estimated beta[0]={betas[0].item():.3f}, beta[1]={betas[1].item():.3f}")
+
+    return betas
+
+
 def estimate_smpl_beta(subject_info: Dict, body_proportions: Dict, gender: str,
                        device: torch.device) -> torch.Tensor:
     """
@@ -1707,7 +1765,15 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
                   subject_info: Optional[Dict] = None,
                   body_proportions: Optional[Dict] = None,
                   use_dynamic_virtual_acromial: bool = False,
-                  dynamic_acromial_k: int = 4) -> Dict:
+                  dynamic_acromial_k: int = 4,
+                  stage_order: str = 'original',
+                  stage2_iters: int = 200,
+                  stage3_iters: int = 200,
+                  stage4_iters: int = 200,
+                  use_anthropometric_init: bool = False,
+                  beta_clamp: float = 5.0,
+                  spine_pose_clamp: float = 0.5,
+                  spine_reg_weight: float = 0.01) -> Dict:
     """
     Optimize SKEL parameters to fit target joints
 
@@ -1799,11 +1865,25 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
         target_shoulder_width = torch.norm(addb_acr_r - addb_acr_l, dim=-1)  # [T]
 
     # Initialize parameters
-    # Priority: 1) subject_info + body_proportions, 2) height-only, 3) legacy, 4) zeros
-    if subject_info is not None and body_proportions is not None:
-        # Best: use full body info for beta estimation
+    # Priority order:
+    # 1) Anthropometric initialization (if enabled) - Physica GitHub style
+    # 2) Data-driven initialization (subject_info + body_proportions) - current method
+    # 3) Height-only fallback
+    # 4) Legacy shoulder-width
+    # 5) Zeros
+
+    if use_anthropometric_init and subject_info is not None and body_proportions is not None:
+        # NEW: Anthropometric initialization using Physica formulas
+        height_m = subject_info.get('height_m', 1.7)
+        shoulder_width_m = body_proportions.get('shoulder_width', 0.35)
+        betas = estimate_skel_beta_anthropometric(height_m, shoulder_width_m, gender, device)
+        betas.requires_grad = True
+        print(f"  Using ANTHROPOMETRIC beta initialization (Physica GitHub style)")
+    elif subject_info is not None and body_proportions is not None:
+        # Existing: data-driven beta estimation
         betas = estimate_skel_beta(subject_info, body_proportions, gender, device)
         betas.requires_grad = True
+        print(f"  Using DATA-DRIVEN beta initialization (linear regression from joint data)")
     elif subject_height is not None:
         # Fallback: height-only initialization
         betas = estimate_beta_from_height(subject_height, device)
@@ -1815,6 +1895,7 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
         betas.requires_grad = True
     else:
         betas = torch.zeros(SKEL_NUM_BETAS, device=device, requires_grad=True)
+        print(f"  Using ZERO beta initialization")
     poses = torch.zeros(T, SKEL_NUM_POSE_DOF, device=device, requires_grad=False)
     trans = torch.zeros(T, 3, device=device, requires_grad=False)
 
@@ -1832,16 +1913,15 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
         poses[:] = initial_poses
     print(f"  IK init: pose norm = {torch.norm(poses).item():.4f}")
 
-    # 3-Stage Optimization Setup
+    # 4-Stage Optimization Setup
     # Stage 1: Beta already initialized from subject_info (done above)
     # Stage 2: Pose + Trans optimization (beta fixed)
-    # Stage 3: Joint optimization (all parameters)
+    # Stage 3: Joint optimization (pose + trans, beta fixed)
+    # Stage 4: Beta refinement (beta only, pose + trans fixed)
 
-    # Calculate iterations per stage
-    stage2_iters = num_iters // 2  # First half: pose only (beta fixed)
-    stage3_iters = num_iters - stage2_iters  # Second half: joint optimization
-
-    print(f"  3-Stage Optimization: Stage2={stage2_iters} iters (pose), Stage3={stage3_iters} iters (joint)")
+    # Stage iterations are now passed as parameters
+    print(f"  4-Stage Optimization ({stage_order} order): Stage2={stage2_iters} (pose), "
+          f"Stage3={stage3_iters}, Stage4={stage4_iters}")
 
     # Dynamic virtual acromial: compute offset and vertex indices
     virtual_acromial_vertex_idx = None
@@ -1922,8 +2002,28 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
         # Minimal regularization (simplified for better MPJPE)
         loss = loss + 0.001 * (poses ** 2).mean()
 
+        # Stronger regularization for spine/thorax/head to prevent unrealistic poses
+        # Pose indices: lumbar (17-19), thorax (20-22), head (23-25)
+        spine_poses = poses[:, 17:26]  # lumbar, thorax, head
+        loss = loss + spine_reg_weight * (spine_poses ** 2).mean()
+
         loss.backward()
         optimizer_pose.step()
+
+        # Apply spine pose clamp to prevent extreme spine rotations
+        with torch.no_grad():
+            # Clamp lumbar (17-19), thorax (20-22), head (23-25)
+            poses.data[:, 17:26] = torch.clamp(poses.data[:, 17:26], -spine_pose_clamp, spine_pose_clamp)
+            # Clamp scapula poses to ±10° (0.17 rad) - moderate constraint
+            # Scapula R (26-28), Scapula L (36-38)
+            scapula_clamp = 0.17  # ~10 degrees
+            poses.data[:, 26:29] = torch.clamp(poses.data[:, 26:29], -scapula_clamp, scapula_clamp)
+            poses.data[:, 36:39] = torch.clamp(poses.data[:, 36:39], -scapula_clamp, scapula_clamp)
+            # Only clamp shoulder_z (twist) - allow free shoulder_x, shoulder_y for arm movement
+            # Shoulder R (29-31), Shoulder L (39-41)
+            shoulder_z_clamp = 0.35   # ~20 degrees for shoulder_z (twist)
+            poses.data[:, 31] = torch.clamp(poses.data[:, 31], -shoulder_z_clamp, shoulder_z_clamp)
+            poses.data[:, 41] = torch.clamp(poses.data[:, 41], -shoulder_z_clamp, shoulder_z_clamp)
 
         if (it + 1) % 20 == 0:
             mpjpe = compute_mpjpe(pred_joints.detach().cpu().numpy(),
@@ -1932,23 +2032,44 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
                   f"BoneDir={bone_dir_loss.item():.4f}")
 
     # ==========================================================================
-    # STAGE 3: Joint optimization (all parameters)
+    # STAGE 3 & 4: Order depends on stage_order parameter
     # ==========================================================================
-    print(f"\n  === Stage 3: Joint Optimization (all params) ===")
 
-    # Enable gradients for all parameters
-    betas.requires_grad = True
-    poses.requires_grad = True
-    trans.requires_grad = True
+    if stage_order == 'swapped':
+        stage3_name = "Beta Refinement (beta only)"
+        stage4_name = "Joint Optimization (all params)"
+    else:
+        stage3_name = "Joint Optimization (all params)"
+        stage4_name = "Beta Refinement (beta only)"
 
-    optimizer_all = torch.optim.Adam([
-        {'params': [betas], 'lr': 0.02},  # Lower LR for fine-tuning
-        {'params': [poses], 'lr': 0.01},
-        {'params': [trans], 'lr': 0.005}
-    ])
+    # ==========================================================================
+    # STAGE 3
+    # ==========================================================================
+    print(f"\n  === Stage 3: {stage3_name} ===")
+
+    if stage_order == 'original':
+        # Original Stage 3: Joint Optimization (all params)
+        betas.requires_grad = True
+        poses.requires_grad = True
+        trans.requires_grad = True
+
+        optimizer_stage3 = torch.optim.Adam([
+            {'params': [betas], 'lr': 0.02},
+            {'params': [poses], 'lr': 0.01},
+            {'params': [trans], 'lr': 0.005}
+        ])
+    else:
+        # Swapped Stage 3: Beta Refinement (beta only)
+        betas.requires_grad = True
+        poses.requires_grad = False
+        trans.requires_grad = False
+
+        optimizer_stage3 = torch.optim.Adam([
+            {'params': [betas], 'lr': 0.02}
+        ])
 
     for it in range(stage3_iters):
-        optimizer_all.zero_grad()
+        optimizer_stage3.zero_grad()
 
         # Forward - SKEL can handle batched input
         verts, joints = skel.forward(
@@ -2003,7 +2124,13 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
         loss = loss + 0.001 * (betas ** 2).mean()
 
         loss.backward()
-        optimizer_all.step()
+        optimizer_stage3.step()
+
+        # Apply beta clamp
+        with torch.no_grad():
+            betas.data = torch.clamp(betas.data, -beta_clamp, beta_clamp)
+            # Extra constraint on beta[0] - it pushes scapula inward significantly
+            betas.data[0] = torch.clamp(betas.data[0], -1.0, 1.0)
 
         if (it + 1) % 20 == 0:
             mpjpe = compute_mpjpe(pred_joints.detach().cpu().numpy(),
@@ -2017,6 +2144,130 @@ def optimize_skel(target_joints: np.ndarray, addb_joint_names: List[str],
             curr_width = torch.norm(pred_joints[:, scapula_r_idx] - pred_joints[:, scapula_l_idx], dim=-1).mean().item() * 1000
             tgt_width = target_shoulder_width.mean().item() * 1000 if has_acromial else 0
             print(f"  Stage3 Iter {it+1}/{stage3_iters}: Loss={loss.item():.4f}, MPJPE={mpjpe:.1f}mm, "
+                  f"BoneLen={bone_len_loss.item():.4f}, Betas||={betas_norm:.3f}, "
+                  f"Width={curr_width:.0f}mm (tgt={tgt_width:.0f}mm){va_loss_str}{sw_loss_str}")
+
+    # ==========================================================================
+    # STAGE 4
+    # ==========================================================================
+    print(f"\n  === Stage 4: {stage4_name} ===")
+
+    if stage_order == 'original':
+        # Original Stage 4: Beta Refinement (beta only)
+        betas.requires_grad = True
+        poses.requires_grad = False
+        trans.requires_grad = False
+
+        optimizer_stage4 = torch.optim.Adam([
+            {'params': [betas], 'lr': 0.02}
+        ])
+    else:
+        # Swapped Stage 4: Joint Optimization (all params)
+        betas.requires_grad = True
+        poses.requires_grad = True
+        trans.requires_grad = True
+
+        optimizer_stage4 = torch.optim.Adam([
+            {'params': [betas], 'lr': 0.02},
+            {'params': [poses], 'lr': 0.01},
+            {'params': [trans], 'lr': 0.005}
+        ])
+
+    for it in range(stage4_iters):
+        optimizer_stage4.zero_grad()
+
+        # Forward - SKEL can handle batched input
+        verts, joints = skel.forward(
+            betas.unsqueeze(0).expand(T, -1),
+            poses,
+            trans
+        )
+
+        pred_joints = joints  # [T, 24, 3]
+
+        # Joint position loss with per-joint weights
+        pred_subset = pred_joints[:, skel_indices]
+        target_subset = target[:, addb_indices]
+
+        valid_mask = ~torch.isnan(target_subset).any(dim=-1)
+        if valid_mask.sum() > 0:
+            # Weighted MSE loss
+            diff = pred_subset - target_subset  # [T, J, 3]
+            sq_diff = (diff ** 2).sum(dim=-1)  # [T, J]
+            weighted_sq_diff = sq_diff * joint_weights.unsqueeze(0)  # [T, J]
+            loss = weighted_sq_diff[valid_mask].mean()
+        else:
+            loss = torch.tensor(0.0, device=device)
+
+        # Bone direction loss (key for preventing mesh twisting)
+        bone_dir_loss = compute_bone_direction_loss(pred_joints, target, bone_pairs)
+        loss = loss + bone_dir_weight * bone_dir_loss
+
+        # Bone length loss (key for body proportion/shape matching)
+        bone_len_loss = compute_bone_length_loss(pred_joints, target, bone_length_pairs)
+        loss = loss + bone_length_weight * bone_len_loss
+
+        # Virtual acromial loss (skin surface → AddB acromial)
+        if has_acromial and virtual_acromial_weight > 0:
+            if virtual_acromial_vertex_idx is not None:
+                virtual_r, virtual_l = compute_dynamic_virtual_acromial(verts, virtual_acromial_vertex_idx)
+            else:
+                virtual_r, virtual_l = compute_virtual_acromial(verts)
+            virtual_acr_loss = (
+                F.mse_loss(virtual_r, addb_acr_r) +
+                F.mse_loss(virtual_l, addb_acr_l)
+            )
+            loss = loss + virtual_acromial_weight * virtual_acr_loss
+
+        # Shoulder width loss (optional)
+        shoulder_w_loss = torch.tensor(0.0, device=device)
+        if has_acromial and shoulder_width_weight > 0:
+            # Compute shoulder width from scapula positions
+            scapula_r_idx = SKEL_JOINT_NAMES.index('scapula_r')
+            scapula_l_idx = SKEL_JOINT_NAMES.index('scapula_l')
+            pred_shoulder_width = torch.norm(
+                pred_joints[:, scapula_r_idx] - pred_joints[:, scapula_l_idx], dim=-1
+            )
+            shoulder_w_loss = F.mse_loss(pred_shoulder_width, target_shoulder_width)
+            loss = loss + shoulder_width_weight * shoulder_w_loss
+
+        # Stronger regularization for spine/thorax/head to prevent unrealistic poses
+        spine_poses = poses[:, 17:26]  # lumbar, thorax, head
+        loss = loss + spine_reg_weight * (spine_poses ** 2).mean()
+
+        loss.backward()
+        optimizer_stage4.step()
+
+        # Apply beta clamp
+        with torch.no_grad():
+            betas.data = torch.clamp(betas.data, -beta_clamp, beta_clamp)
+            # Extra constraint on beta[0] - it pushes scapula inward significantly
+            # beta[0]=1.0 causes ~12mm inward movement, so limit to ±1.0
+            betas.data[0] = torch.clamp(betas.data[0], -1.0, 1.0)
+            # Apply spine pose clamp to prevent extreme spine rotations
+            poses.data[:, 17:26] = torch.clamp(poses.data[:, 17:26], -spine_pose_clamp, spine_pose_clamp)
+            # Clamp scapula poses to ±10° (0.17 rad) - moderate constraint
+            scapula_clamp = 0.17  # ~10 degrees
+            poses.data[:, 26:29] = torch.clamp(poses.data[:, 26:29], -scapula_clamp, scapula_clamp)
+            poses.data[:, 36:39] = torch.clamp(poses.data[:, 36:39], -scapula_clamp, scapula_clamp)
+            # Only clamp shoulder_z (twist) - allow free shoulder_x, shoulder_y for arm movement
+            shoulder_z_clamp = 0.35   # ~20 degrees for shoulder_z (twist)
+            poses.data[:, 31] = torch.clamp(poses.data[:, 31], -shoulder_z_clamp, shoulder_z_clamp)
+            poses.data[:, 41] = torch.clamp(poses.data[:, 41], -shoulder_z_clamp, shoulder_z_clamp)
+
+        # Print progress
+        if (it + 1) % 20 == 0 or it == 0:
+            with torch.no_grad():
+                mpjpe = torch.sqrt(((pred_subset - target_subset) ** 2).sum(dim=-1)[valid_mask]).mean().item() * 1000
+                betas_norm = torch.norm(betas).item()
+            va_loss_str = f", VirtAcr={virtual_acr_loss.item():.4f}" if has_acromial and virtual_acromial_weight > 0 else ""
+            sw_loss_str = f", ShoulderW={shoulder_w_loss.item():.4f}" if has_acromial and shoulder_width_weight > 0 else ""
+            # Compute current shoulder width
+            scapula_r_idx = SKEL_JOINT_NAMES.index('scapula_r')
+            scapula_l_idx = SKEL_JOINT_NAMES.index('scapula_l')
+            curr_width = torch.norm(pred_joints[:, scapula_r_idx] - pred_joints[:, scapula_l_idx], dim=-1).mean().item() * 1000
+            tgt_width = target_shoulder_width.mean().item() * 1000 if has_acromial else 0
+            print(f"  Stage4 Iter {it+1}/{stage4_iters}: Loss={loss.item():.4f}, MPJPE={mpjpe:.1f}mm, "
                   f"BoneLen={bone_len_loss.item():.4f}, Betas||={betas_norm:.3f}, "
                   f"Width={curr_width:.0f}mm (tgt={tgt_width:.0f}mm){va_loss_str}{sw_loss_str}")
 
@@ -2061,6 +2312,21 @@ def main():
     parser.add_argument('--num_iters', type=int, default=100, help='Optimization iterations')
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--save_every', type=int, default=1, help='Save OBJ every N frames')
+    # Hyperparameter tuning arguments
+    parser.add_argument('--stage-order', type=str, default='original', choices=['original', 'swapped'],
+                        help='Stage order: original (S3=joint, S4=beta) or swapped (S3=beta, S4=joint)')
+    parser.add_argument('--stage2-iters', type=int, default=200, help='Stage 2 iterations (pose)')
+    parser.add_argument('--stage3-iters', type=int, default=200, help='Stage 3 iterations')
+    parser.add_argument('--stage4-iters', type=int, default=200, help='Stage 4 iterations')
+    parser.add_argument('--anthropometric-init', action='store_true',
+                        help='Use anthropometric initialization (Physica GitHub style) instead of data-driven')
+    parser.add_argument('--beta-clamp', type=float, default=5.0, help='Beta clamp range (±value)')
+    parser.add_argument('--spine-pose-clamp', type=float, default=0.5,
+                        help='Spine pose clamp range in radians (±value), ~28.6 degrees')
+    parser.add_argument('--spine-reg-weight', type=float, default=0.01,
+                        help='Spine pose regularization weight (higher = more constrained)')
+    parser.add_argument('--gender', type=str, default=None, choices=['male', 'female'],
+                        help='Override gender for model selection (default: use AddB annotation)')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -2086,10 +2352,14 @@ def main():
     # Determine gender for model selection
     sex = subject_info.get('sex', 'male')  # Default to male if not available
     # Map AddB sex to model gender (AddB uses 'male'/'female', models use same)
-    gender = sex if sex in ['male', 'female'] else 'male'
+    if args.gender is not None:
+        gender = args.gender
+        print(f"\nGender override: using {gender} model (AddB annotation: {sex})")
+    else:
+        gender = sex if sex in ['male', 'female'] else 'male'
     print(f"\nSubject info: height={subject_info.get('height_m', 'N/A')}m, "
           f"mass={subject_info.get('mass_kg', 'N/A')}kg, "
-          f"sex={sex}, age={subject_info.get('age', 'N/A')}")
+          f"sex={sex}, model_gender={gender}, age={subject_info.get('age', 'N/A')}")
 
     # SMPL optimization (with gender-specific model and beta initialization)
     smpl_result = optimize_smpl(
@@ -2104,12 +2374,20 @@ def main():
     skel_result = optimize_skel(
         target_joints, joint_names, device, args.num_iters,
         virtual_acromial_weight=0.0,       # 0 = acromial→humerus 직접 매핑 (20 joints)
-        shoulder_width_weight=1.0,         # Mild shoulder width constraint
+        shoulder_width_weight=1.0,         # Match AddB acromial width
         use_beta_init=True,                # Initialize beta from AddB proportions
         use_dynamic_virtual_acromial=False, # Disabled when virtual_acromial_weight=0
         gender=gender,
         subject_info=subject_info,
-        body_proportions=body_proportions
+        body_proportions=body_proportions,
+        stage_order=args.stage_order,
+        stage2_iters=args.stage2_iters,
+        stage3_iters=args.stage3_iters,
+        stage4_iters=args.stage4_iters,
+        use_anthropometric_init=args.anthropometric_init,
+        beta_clamp=args.beta_clamp,
+        spine_pose_clamp=args.spine_pose_clamp,
+        spine_reg_weight=args.spine_reg_weight
     )
 
     # Save results
