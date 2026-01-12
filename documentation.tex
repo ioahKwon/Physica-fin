@@ -1,0 +1,512 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{fancyvrb}
+
+\title{SKEL Force Visualization System\\
+\large Joint Torque and GRF Visualization on SKEL Skeleton Mesh}
+\author{Technical Documentation}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Overview}
+
+This document describes the SKEL Force Visualization system, which visualizes joint torques and Ground Reaction Forces (GRF) from AddBiomechanics data on SKEL skeleton meshes. The visualization follows the PhysPT paper style with:
+
+\begin{itemize}
+    \item \textbf{Skeleton mesh} colored by joint torque magnitude using the Plasma colormap
+    \item \textbf{LBS-based bone segmentation} for proper per-bone coloring
+    \item \textbf{3-axis torque lines} (X=Pink, Y=Green, Z=Cyan) with endpoint spheres
+    \item \textbf{GRF arrows} (Red) from Center of Pressure in force direction
+    \item \textbf{Body mesh} rendered separately in gray
+\end{itemize}
+
+\section{Data Pipeline}
+
+\subsection{Input Data Sources}
+
+\begin{enumerate}
+    \item \textbf{AddBiomechanics (.b3d files)}: Contains biomechanical data including:
+    \begin{itemize}
+        \item Joint positions $\mathbf{p}_j \in \mathbb{R}^3$ for each joint $j$
+        \item Joint torques $\boldsymbol{\tau}_j \in \mathbb{R}^{n_j}$ where $n_j$ is the DOF count
+        \item Ground reaction forces (GRF) and center of pressure (CoP)
+    \end{itemize}
+
+    \item \textbf{SKEL Mesh Files}: Generated from AddBiomechanics to SKEL conversion:
+    \begin{itemize}
+        \item \texttt{skel\_mesh.obj}: Body surface mesh
+        \item \texttt{skel\_skeleton.obj}: Internal skeleton bone mesh ($\sim$10MB, detailed bone geometry)
+    \end{itemize}
+
+    \item \textbf{Force Data JSON}: Preprocessed per-frame data:
+    \begin{itemize}
+        \item Joint positions, torque magnitudes, and tau vectors
+        \item GRF vectors, CoP positions, and contact flags
+    \end{itemize}
+\end{enumerate}
+
+\section{Joint Mapping System}
+
+\subsection{SKEL 24 Joints}
+
+The SKEL model uses 24 joints indexed as follows:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{clcl}
+\toprule
+Index & Joint Name & Index & Joint Name \\
+\midrule
+0 & pelvis & 12 & thorax \\
+1 & femur\_r & 13 & head \\
+2 & tibia\_r & 14 & scapula\_r \\
+3 & talus\_r & 15 & humerus\_r \\
+4 & calcn\_r & 16 & ulna\_r \\
+5 & toes\_r & 17 & radius\_r \\
+6 & femur\_l & 18 & hand\_r \\
+7 & tibia\_l & 19 & scapula\_l \\
+8 & talus\_l & 20 & humerus\_l \\
+9 & calcn\_l & 21 & ulna\_l \\
+10 & toes\_l & 22 & radius\_l \\
+11 & lumbar & 23 & hand\_l \\
+\bottomrule
+\end{tabular}
+\caption{SKEL 24 Joint Index Mapping}
+\end{table}
+
+\subsection{AddBiomechanics to SKEL Joint Mapping}
+
+AddBiomechanics joint names are mapped to SKEL joint indices. \textbf{Important:} Some AddBiomechanics joints map to multiple SKEL joints (one-to-many mapping):
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+AddBiomechanics Joint & SKEL Indices \\
+\midrule
+ground\_pelvis & [0] (pelvis) \\
+hip\_r & [1] (femur\_r) \\
+walker\_knee\_r & [2] (tibia\_r) \\
+ankle\_r & [3] (talus\_r) \\
+subtalar\_r & [4] (calcn\_r) \\
+mtp\_r & [5] (toes\_r) \\
+hip\_l & [6] (femur\_l) \\
+walker\_knee\_l & [7] (tibia\_l) \\
+ankle\_l & [8] (talus\_l) \\
+subtalar\_l & [9] (calcn\_l) \\
+mtp\_l & [10] (toes\_l) \\
+\textbf{back} & \textbf{[11, 12, 13]} (lumbar + thorax + head) \\
+\textbf{acromial\_r} & \textbf{[14, 15]} (scapula\_r + humerus\_r) \\
+elbow\_r & [16] (ulna\_r) \\
+radioulnar\_r & [17] (radius\_r) \\
+radius\_hand\_r & [18] (hand\_r) \\
+\textbf{acromial\_l} & \textbf{[19, 20]} (scapula\_l + humerus\_l) \\
+elbow\_l & [21] (ulna\_l) \\
+radioulnar\_l & [22] (radius\_l) \\
+radius\_hand\_l & [23] (hand\_l) \\
+\bottomrule
+\end{tabular}
+\caption{AddBiomechanics to SKEL Joint Mapping (one-to-many mappings in bold)}
+\end{table}
+
+\subsection{Parent Joint Fallback for Missing Torque Data}
+
+AddBiomechanics does not provide torque data for certain joints (e.g., \texttt{mtp\_r}, \texttt{radioulnar\_r}). The system inherits torque from parent joints using a recursive fallback chain:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+Missing Joint & Fallback Parent & Description \\
+\midrule
+mtp\_r (toes) & subtalar\_r & Toe inherits from ankle \\
+mtp\_l (toes) & subtalar\_l & Toe inherits from ankle \\
+radioulnar\_r & elbow\_r & Forearm rotation inherits from elbow \\
+radioulnar\_l & elbow\_l & Forearm rotation inherits from elbow \\
+radius\_hand\_r & elbow\_r & Wrist inherits from elbow \\
+radius\_hand\_l & elbow\_l & Wrist inherits from elbow \\
+subtalar\_r & ankle\_r & Heel inherits from ankle \\
+subtalar\_l & ankle\_l & Heel inherits from ankle \\
+ankle\_r & walker\_knee\_r & Ankle inherits from knee (if missing) \\
+ankle\_l & walker\_knee\_l & Ankle inherits from knee (if missing) \\
+\bottomrule
+\end{tabular}
+\caption{Parent Joint Fallback Chain}
+\end{table}
+
+The fallback is applied recursively: if the parent joint also has no torque data, the system continues up the kinematic chain until valid data is found.
+
+\section{LBS-based Bone Segmentation}
+
+\subsection{Linear Blend Skinning Weights}
+
+The SKEL template mesh has 247,252 vertices, each with skinning weights for 24 joints:
+
+\begin{equation}
+\mathbf{W} \in \mathbb{R}^{247252 \times 24}, \quad \sum_{j=1}^{24} W_{v,j} = 1 \quad \forall v
+\end{equation}
+
+\subsection{Dominant Joint Assignment}
+
+Each vertex is assigned to its dominant joint:
+
+\begin{equation}
+\text{dominant\_joint}(v) = \arg\max_{j \in \{0, ..., 23\}} W_{v,j}
+\end{equation}
+
+\subsection{Vertex Count Mismatch Handling}
+
+Saved meshes may have deduplicated vertices (e.g., 115,010 vs 247,252). The system handles this via face-based vertex mapping:
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+Algorithm: Face-based Vertex Mapping
+Input: Deduplicated vertices V_dedup, faces F
+       Template vertices V_template, dominant joints D_template
+Output: Dominant joints for deduplicated mesh D_dedup
+
+For each vertex v_i in V_dedup:
+    1. Find faces containing v_i
+    2. Get original template face indices
+    3. Map to template vertex index via face correspondence
+    4. D_dedup[i] = D_template[template_idx]
+\end{Verbatim}
+
+\subsection{SKEL Joint Vertex Distribution}
+
+Each joint controls a specific number of vertices:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{clr|clr}
+\toprule
+Idx & Joint & Vertices & Idx & Joint & Vertices \\
+\midrule
+0 & pelvis & 8,456 & 12 & thorax & 15,234 \\
+1 & femur\_r & 3,421 & 13 & head & 22,156 \\
+2 & tibia\_r & 2,876 & 14 & scapula\_r & 4,123 \\
+3 & talus\_r & 99 & 15 & humerus\_r & 2,345 \\
+4 & calcn\_r & 1,234 & 16 & ulna\_r & 1,567 \\
+5 & toes\_r & 1,595 & 17 & radius\_r & 236 \\
+6-10 & (left leg) & similar & 18 & hand\_r & 41,196 \\
+11 & lumbar & 5,678 & 19-23 & (left arm) & similar \\
+\bottomrule
+\end{tabular}
+\caption{Approximate vertex count per joint}
+\end{table}
+
+\section{Algorithms}
+
+\subsection{Plasma Colormap}
+
+The Plasma colormap maps torque magnitude to color (purple $\rightarrow$ yellow):
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+Algorithm: Torque to Plasma Color
+Input: Torque magnitude m, max_torque m_max (default: 300 Nm)
+Output: RGB color tuple (r, g, b) in [0,1]^3
+
+1. If m < 0.01: return (0.8, 0.8, 0.8)  # Light gray for no torque
+
+2. t = log10(m + 1) / log10(m_max + 1)  # Log-scale normalization
+3. t = clip(t, 0, 1)
+
+4. Plasma control points:
+   C0 = (0.050, 0.030, 0.528)  # t=0.0: Dark purple
+   C1 = (0.418, 0.001, 0.658)  # t=0.25: Purple
+   C2 = (0.798, 0.280, 0.470)  # t=0.5: Magenta
+   C3 = (0.988, 0.558, 0.231)  # t=0.75: Orange
+   C4 = (0.940, 0.975, 0.131)  # t=1.0: Yellow
+
+5. i = floor(4*t), f = 4*t - i
+6. If i >= 4: return C4
+7. return (1-f)*C_i + f*C_{i+1}  # Linear interpolation
+\end{Verbatim}
+
+\subsection{LBS-based Vertex Coloring}
+
+Each skeleton mesh vertex is colored based on its dominant joint's torque:
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+Algorithm: LBS-based Skeleton Vertex Coloring
+Input: Skeleton vertices V, faces F
+       LBS weights W, joint torques T
+       AddB to SKEL mapping M, parent fallback P
+Output: Vertex colors C
+
+Step 1: Build SKEL index to torque mapping
+  For each AddB joint name a with torque tau_a:
+    For each SKEL index s in M[a]:
+      T_skel[s] = max(T_skel[s], tau_a)
+
+Step 2: Apply parent fallback
+  For each (child, parent) in P:
+    For each SKEL index s in M[child]:
+      If T_skel[s] = 0:
+        p = parent
+        While T[p] = 0 and p in P:
+          p = P[p]  # Recursive fallback
+        If T[p] > 0:
+          T_skel[s] = T[p]
+
+Step 3: Assign colors
+  For each vertex v_i in V:
+    j = dominant_joint(v_i)
+    C[i] = PlasmaColor(T_skel[j])
+  Return C
+\end{Verbatim}
+
+\subsection{3-Axis Torque Line Generation}
+
+For each joint, three axis-aligned lines represent the X, Y, Z components:
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+Algorithm: 3-Axis Torque Line Generation
+Input: Joint position p in R^3
+       Torque vector tau in R^n (1-6 DOFs)
+       Scale factor s (default: 0.002 m/Nm)
+       Threshold theta (default: 0.5 Nm)
+Output: Line meshes L and endpoint spheres S
+
+1. Pad tau to 3D:
+   If n = 1: tau_3D = (0, tau_1, 0)  # 1-DOF: Y-axis rotation
+   Elif n = 2: tau_3D = (tau_1, tau_2, 0)
+   Else: tau_3D = (tau_1, tau_2, tau_3)
+
+2. Axis colors:
+   c_X = (1.0, 0.4, 0.7)  # Pink
+   c_Y = (0.4, 1.0, 0.4)  # Neon Green
+   c_Z = (0.4, 0.8, 1.0)  # Cyan
+
+3. For axis a in {X, Y, Z}:
+   m_a = |tau_3D[a]|
+   If m_a < theta: continue
+
+   length = m_a * s
+   sign = sgn(tau_3D[a])
+   e = p + sign * d_a * length
+
+   L_a = CreateCylinder(p, e, r=0.004)
+   S_a = CreateSphere(e, r=0.012)
+\end{Verbatim}
+
+\section{Ground Reaction Force (GRF) Visualization}
+
+\subsection{GRF Arrow Parameters}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+Parameter & Default Value & Description \\
+\midrule
+\texttt{show\_grf} & True & Enable GRF visualization \\
+\texttt{grf\_scale} & 0.001 m/N & Arrow length scale (710N $\rightarrow$ 71cm) \\
+\texttt{grf\_radius} & 0.008 m & Arrow shaft radius \\
+\texttt{grf\_color} & (1.0, 0.2, 0.2) & Bright red \\
+\bottomrule
+\end{tabular}
+\caption{GRF Visualization Parameters}
+\end{table}
+
+\subsection{GRF Arrow Generation Algorithm}
+
+\begin{Verbatim}[frame=single,fontsize=\small]
+Algorithm: GRF Arrow Generation
+Input: GRF list from force_data.json
+       Scale s, radius r, color c
+Output: Arrow meshes (shaft + head)
+
+For each GRF entry:
+  If contact = 0: continue  # Skip non-contact
+
+  CoP = center of pressure position
+  F = force vector [F_x, F_y, F_z]
+  |F| = force magnitude
+
+  If |F| < 1 N: continue  # Skip negligible forces
+
+  F_hat = F / |F|  # Normalize direction
+  length = |F| * s  # Arrow length
+  e = CoP + F_hat * length  # Arrow endpoint
+
+  Create cylinder from CoP to e with radius r
+  Create sphere at e with radius 2r (arrow head)
+\end{Verbatim}
+
+\subsection{GRF Data Structure}
+
+Example GRF entry from \texttt{force\_data.json}:
+
+\begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+{
+    "body_idx": 0,           # 0=right foot, 1=left foot
+    "grf": [-102.5, 702.7, 21.3],  # Force vector [N]
+    "cop": [-0.308, 0.0, 0.221],   # Center of Pressure [m]
+    "magnitude": 710.41,     # |F| in Newtons
+    "contact": 1             # 1=contact, 0=no contact
+}
+\end{lstlisting}
+
+\section{Output Format}
+
+\subsection{OBJ with Vertex Colors}
+
+The output OBJ files use the extended vertex format with RGB colors:
+
+\begin{lstlisting}[language=bash, basicstyle=\ttfamily\small]
+# SKEL skeleton mesh + 3-axis torque lines + GRF arrows
+# Skeleton: colored by joint torque magnitude
+# Axes: X=Pink, Y=Neon Green, Z=Cyan (with endpoint balls)
+# GRF: Red arrows from CoP in force direction
+
+# Vertex format: v x y z r g b
+v 0.123456 0.789012 0.345678 0.9400 0.9752 0.1313
+v ...
+
+# Face format (1-indexed)
+f 1 2 3
+f ...
+\end{lstlisting}
+
+\subsection{Output Files per Frame}
+
+\begin{itemize}
+    \item \texttt{frame\_XXXX\_skeleton\_axes.obj}: Combined skeleton mesh + 3-axis lines + GRF arrows
+    \item \texttt{frame\_XXXX\_body.obj}: Body surface mesh (gray)
+    \item \texttt{frame\_XXXX\_force.txt}: Human-readable torque summary
+\end{itemize}
+
+\section{Python Module Structure}
+
+\begin{lstlisting}[language=bash, basicstyle=\ttfamily\small]
+skel_force_vis/
+|-- __init__.py          # Package initialization
+|-- __main__.py          # CLI entry point
+|-- colormaps.py         # Plasma colormap and axis colors
+|-- mesh_utils.py        # Cylinder, sphere, OBJ I/O
+|-- lbs_utils.py         # LBS weights, joint mapping, fallback
+|-- visualizer.py        # SKELForceVisualizer class
+|-- run.py               # Command-line interface
+|-- documentation.tex    # This document
+\end{lstlisting}
+
+\section{Usage Examples}
+
+\subsection{Python API}
+
+\begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+from skel_force_vis import SKELForceVisualizer
+
+vis = SKELForceVisualizer(
+    input_base="/path/to/skel_force_vis/Falisse2017_subject_1",
+    output_dir="/path/to/output",
+    skel_model_path="/path/to/skel_models_v1.1",
+    gender='male',
+    use_lbs_coloring=True,
+    max_torque=300.0,
+    show_grf=True,
+    grf_scale=0.001,
+)
+
+results = vis.process_all_frames()
+# Output: frame_0050: 14 joints, 48 axes, 2 GRF
+\end{lstlisting}
+
+\subsection{Configuration Parameters}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llc}
+\toprule
+Parameter & Description & Default Value \\
+\midrule
+\texttt{max\_torque} & Colormap normalization max & 300 Nm \\
+\texttt{line\_scale} & Torque to length conversion & 0.002 m/Nm \\
+\texttt{line\_radius} & Axis line cylinder radius & 0.004 m \\
+\texttt{sphere\_radius} & Endpoint sphere radius & 0.012 m \\
+\texttt{torque\_threshold} & Minimum torque to display & 0.5 Nm \\
+\texttt{use\_lbs\_coloring} & Use LBS weights for coloring & True \\
+\texttt{show\_grf} & Display GRF arrows & True \\
+\texttt{grf\_scale} & GRF arrow length scale & 0.001 m/N \\
+\texttt{grf\_radius} & GRF arrow shaft radius & 0.008 m \\
+\bottomrule
+\end{tabular}
+\caption{SKELForceVisualizer Configuration Parameters}
+\end{table}
+
+\section{Color Scheme Summary}
+
+\begin{itemize}
+    \item \textbf{Skeleton Mesh (Plasma colormap)}:
+    \begin{itemize}
+        \item Low torque ($<$10 Nm): Dark purple \textcolor[RGB]{13,8,135}{$\blacksquare$}
+        \item Medium torque ($\sim$50 Nm): Magenta \textcolor[RGB]{204,71,120}{$\blacksquare$}
+        \item High torque ($>$200 Nm): Yellow \textcolor[RGB]{240,249,33}{$\blacksquare$}
+        \item No torque data: Light gray \textcolor[RGB]{204,204,204}{$\blacksquare$}
+    \end{itemize}
+
+    \item \textbf{Torque Axis Lines}:
+    \begin{itemize}
+        \item X-axis: Pink \textcolor[RGB]{255,102,178}{$\blacksquare$} $(1.0, 0.4, 0.7)$
+        \item Y-axis: Neon Green \textcolor[RGB]{102,255,102}{$\blacksquare$} $(0.4, 1.0, 0.4)$
+        \item Z-axis: Cyan \textcolor[RGB]{102,204,255}{$\blacksquare$} $(0.4, 0.8, 1.0)$
+    \end{itemize}
+
+    \item \textbf{GRF Arrows}: Bright Red \textcolor[RGB]{255,51,51}{$\blacksquare$} $(1.0, 0.2, 0.2)$
+
+    \item \textbf{Body Mesh}: Gray $(0.7, 0.7, 0.7)$
+\end{itemize}
+
+\section{Example Output Analysis}
+
+\subsection{Frame 50 - Falisse2017\_subject\_1}
+
+\begin{verbatim}
+Joint Torques (sorted by magnitude):
+  ground_pelvis       :   786.22 Nm  (Yellow - highest)
+  hip_r               :   137.56 Nm  (Orange)
+  back                :    74.57 Nm  (Orange/Magenta)
+  hip_l               :    68.51 Nm  (Orange/Magenta)
+  acromial_r          :    13.47 Nm  (Purple)
+  acromial_l          :    11.12 Nm  (Purple)
+  ankle_r             :     7.99 Nm  (Purple/Blue)
+  walker_knee_l       :     5.04 Nm  (Blue)
+  subtalar_r          :     4.08 Nm  (Blue)
+  walker_knee_r       :     3.08 Nm  (Blue)
+  elbow_r             :     2.57 Nm  (Blue)
+  elbow_l             :     1.69 Nm  (Blue)
+  subtalar_l          :     0.73 Nm  (Dark Blue)
+  radius_hand_l       :     0.54 Nm  (Dark Blue)
+
+GRF (Right foot contact):
+  Magnitude: 710.41 N
+  Direction: [-102.5, 702.7, 21.3] N (mostly vertical)
+  CoP: [-0.308, 0.0, 0.221] m
+\end{verbatim}
+
+\textbf{Note}: The foot appears blue despite GRF=710N because joint torque (ankle $\approx$8 Nm) is different from GRF. GRF is the external force from the ground; joint torque is the internal moment generated by muscles.
+
+\section{References}
+
+\begin{itemize}
+    \item \textbf{AddBiomechanics}: \url{https://addbiomechanics.org/}
+    \item \textbf{SKEL}: Keller et al., "SKEL: A Parametric Body Model with Bones"
+    \item \textbf{PhysPT}: Physics-aware pretrained transformer for human motion
+    \item \textbf{Plasma Colormap}: Matplotlib perceptually uniform colormap
+\end{itemize}
+
+\end{document}
