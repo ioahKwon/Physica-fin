@@ -1,0 +1,515 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\title{Torso Regularization Losses for Skeleton Fitting\\
+\large Preventing Forward Collapse in AddBiomechanics Data}
+\author{Technical Documentation}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem Statement}
+
+When fitting parametric skeleton models (SKEL/OpenSim) to AddBiomechanics data, the absence of head and neck marker observations causes the optimization to produce unrealistic forward collapse of the torso. This document describes two soft regularization losses to prevent this issue while preserving natural motion.
+
+\section{Loss 1: Torso Upright Loss (Soft Hinge)}
+
+\subsection{Mathematical Definition}
+
+Let $\mathbf{R}_{\text{torso}} \in SO(3)$ be the world-space rotation matrix of the torso body. The torso's up vector in world coordinates is:
+
+\begin{equation}
+\mathbf{u}_{\text{torso}} = \mathbf{R}_{\text{torso}} \cdot \mathbf{y}_{\text{local}}
+\end{equation}
+
+where $\mathbf{y}_{\text{local}} = [0, 1, 0]^T$ is the local up axis.
+
+The alignment with world up $\mathbf{y}_{\text{world}} = [0, 1, 0]^T$ is measured by:
+
+\begin{equation}
+\cos\theta = \mathbf{u}_{\text{torso}} \cdot \mathbf{y}_{\text{world}}
+\end{equation}
+
+The pitch angle $\theta$ (deviation from upright) is:
+
+\begin{equation}
+\theta = \arccos(\text{clamp}(\cos\theta, -1, 1))
+\end{equation}
+
+\textbf{Soft Hinge Loss:} Penalize only when $\theta > \theta_{\text{thresh}}$:
+
+\begin{equation}
+\mathcal{L}_{\text{upright}} = \lambda_1 \cdot \max(0, \theta - \theta_{\text{thresh}})^2
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $\theta_{\text{thresh}} \approx 20°$--$30°$ (allows natural forward lean)
+    \item $\lambda_1 \approx 0.01$--$0.1$ (soft regularization weight)
+\end{itemize}
+
+\subsection{Differentiable Implementation}
+
+For gradient-based optimization, avoid $\arccos$ discontinuities:
+
+\begin{equation}
+\mathcal{L}_{\text{upright}} = \lambda_1 \cdot \text{ReLU}(\cos\theta_{\text{thresh}} - \cos\theta)^2
+\end{equation}
+
+Since $\cos$ is monotonically decreasing in $[0, \pi]$, $\theta > \theta_{\text{thresh}}$ is equivalent to $\cos\theta < \cos\theta_{\text{thresh}}$.
+
+\section{Loss 2: Virtual Head Forward Offset Loss}
+
+\subsection{Mathematical Definition}
+
+Using forward kinematics, compute the head position $\mathbf{p}_{\text{head}} \in \mathbb{R}^3$ and pelvis position $\mathbf{p}_{\text{pelvis}} \in \mathbb{R}^3$.
+
+Define the forward direction. Two options:
+
+\textbf{Option A: Global Forward (simpler)}
+\begin{equation}
+\mathbf{d}_{\text{fwd}} = [0, 0, 1]^T \quad \text{or} \quad [1, 0, 0]^T
+\end{equation}
+
+\textbf{Option B: Pelvis-relative Forward (more robust)}
+\begin{equation}
+\mathbf{d}_{\text{fwd}} = \mathbf{R}_{\text{pelvis}} \cdot \mathbf{z}_{\text{local}}
+\end{equation}
+
+The forward offset of the head relative to pelvis:
+
+\begin{equation}
+\delta_{\text{fwd}} = (\mathbf{p}_{\text{head}} - \mathbf{p}_{\text{pelvis}}) \cdot \mathbf{d}_{\text{fwd}}
+\end{equation}
+
+\textbf{Soft Hinge Loss:} Penalize only when head is too far forward:
+
+\begin{equation}
+\mathcal{L}_{\text{head}} = \lambda_2 \cdot \max(0, \delta_{\text{fwd}} - \delta_{\text{thresh}})^2
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $\delta_{\text{thresh}} \approx 0.15$--$0.25$ m (typical head-pelvis offset)
+    \item $\lambda_2 \approx 0.01$--$0.1$
+\end{itemize}
+
+\section{Combined Objective}
+
+The total fitting objective becomes:
+
+\begin{equation}
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{data}} + \mathcal{L}_{\text{upright}} + \mathcal{L}_{\text{head}} + \mathcal{L}_{\text{other}}
+\end{equation}
+
+where $\mathcal{L}_{\text{data}}$ is the marker fitting loss (e.g., marker RMSE).
+
+\section{Algorithm}
+
+\begin{algorithm}[H]
+\caption{Torso Regularization in Fitting Loop}
+\begin{algorithmic}[1]
+\REQUIRE Skeleton $\mathcal{S}$, pose parameters $\boldsymbol{\theta}$, marker observations $\mathbf{M}_{\text{obs}}$
+\REQUIRE Thresholds: $\theta_{\text{thresh}}$, $\delta_{\text{thresh}}$
+\REQUIRE Weights: $\lambda_1$, $\lambda_2$
+
+\STATE \textbf{// Forward Kinematics}
+\STATE $\mathbf{T}_{\text{bodies}} \leftarrow \text{FK}(\mathcal{S}, \boldsymbol{\theta})$ \COMMENT{World transforms for all bodies}
+\STATE $\mathbf{M}_{\text{pred}} \leftarrow \text{GetMarkerPositions}(\mathcal{S}, \mathbf{T}_{\text{bodies}})$
+
+\STATE \textbf{// Data Fitting Loss}
+\STATE $\mathcal{L}_{\text{data}} \leftarrow \|\mathbf{M}_{\text{pred}} - \mathbf{M}_{\text{obs}}\|^2$
+
+\STATE \textbf{// Loss 1: Torso Upright}
+\STATE $\mathbf{R}_{\text{torso}} \leftarrow \mathbf{T}_{\text{bodies}}[\text{"torso"}].\text{rotation}$
+\STATE $\mathbf{u}_{\text{torso}} \leftarrow \mathbf{R}_{\text{torso}} \cdot [0, 1, 0]^T$
+\STATE $\cos\theta \leftarrow \mathbf{u}_{\text{torso}} \cdot [0, 1, 0]^T$
+\STATE $\mathcal{L}_{\text{upright}} \leftarrow \lambda_1 \cdot \text{ReLU}(\cos\theta_{\text{thresh}} - \cos\theta)^2$
+
+\STATE \textbf{// Loss 2: Head Forward Offset}
+\STATE $\mathbf{p}_{\text{head}} \leftarrow \mathbf{T}_{\text{bodies}}[\text{"head"}].\text{translation}$
+\STATE $\mathbf{p}_{\text{pelvis}} \leftarrow \mathbf{T}_{\text{bodies}}[\text{"pelvis"}].\text{translation}$
+\STATE $\mathbf{d}_{\text{fwd}} \leftarrow \mathbf{R}_{\text{pelvis}} \cdot [0, 0, 1]^T$ \COMMENT{Pelvis forward}
+\STATE $\delta_{\text{fwd}} \leftarrow (\mathbf{p}_{\text{head}} - \mathbf{p}_{\text{pelvis}}) \cdot \mathbf{d}_{\text{fwd}}$
+\STATE $\mathcal{L}_{\text{head}} \leftarrow \lambda_2 \cdot \text{ReLU}(\delta_{\text{fwd}} - \delta_{\text{thresh}})^2$
+
+\STATE \textbf{// Total Loss}
+\STATE $\mathcal{L}_{\text{total}} \leftarrow \mathcal{L}_{\text{data}} + \mathcal{L}_{\text{upright}} + \mathcal{L}_{\text{head}}$
+
+\RETURN $\mathcal{L}_{\text{total}}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Python Implementation}
+
+\begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+import torch
+import torch.nn.functional as F
+import numpy as np
+
+class TorsoRegularizer:
+    """
+    Soft regularization losses to prevent forward collapse
+    during skeleton fitting to AddBiomechanics data.
+    """
+
+    def __init__(
+        self,
+        # Torso upright loss params
+        upright_thresh_deg: float = 25.0,
+        upright_weight: float = 0.05,
+        # Head forward offset loss params
+        head_fwd_thresh_m: float = 0.20,
+        head_fwd_weight: float = 0.05,
+        # Body names (adjust for your skeleton)
+        torso_body_name: str = "torso",
+        head_body_name: str = "head",
+        pelvis_body_name: str = "pelvis",
+    ):
+        self.upright_thresh_cos = np.cos(np.radians(upright_thresh_deg))
+        self.upright_weight = upright_weight
+        self.head_fwd_thresh = head_fwd_thresh_m
+        self.head_fwd_weight = head_fwd_weight
+
+        self.torso_body = torso_body_name
+        self.head_body = head_body_name
+        self.pelvis_body = pelvis_body_name
+
+    def compute_losses(
+        self,
+        body_rotations: dict,   # {body_name: rotation_matrix}
+        body_positions: dict,   # {body_name: position_vector}
+    ) -> dict:
+        """
+        Compute regularization losses.
+
+        Args:
+            body_rotations: Dict mapping body name to [3,3] rotation matrix
+            body_positions: Dict mapping body name to [3] position vector
+
+        Returns:
+            Dict with 'upright_loss', 'head_fwd_loss', 'total_reg_loss'
+        """
+        losses = {}
+
+        # ============================================
+        # Loss 1: Torso Upright (Soft Hinge)
+        # ============================================
+        R_torso = body_rotations[self.torso_body]  # [3, 3]
+        y_local = torch.tensor([0.0, 1.0, 0.0], device=R_torso.device)
+        y_world = torch.tensor([0.0, 1.0, 0.0], device=R_torso.device)
+
+        # Torso up vector in world space
+        u_torso = R_torso @ y_local  # [3]
+
+        # Cosine of angle with world up
+        cos_theta = torch.dot(u_torso, y_world)
+
+        # Hinge loss: penalize when cos_theta < cos_thresh
+        # (i.e., when angle > threshold)
+        upright_violation = F.relu(self.upright_thresh_cos - cos_theta)
+        losses['upright_loss'] = self.upright_weight * upright_violation ** 2
+
+        # ============================================
+        # Loss 2: Head Forward Offset (Soft Hinge)
+        # ============================================
+        p_head = body_positions[self.head_body]      # [3]
+        p_pelvis = body_positions[self.pelvis_body]  # [3]
+        R_pelvis = body_rotations[self.pelvis_body]  # [3, 3]
+
+        # Pelvis forward direction (local Z in world)
+        z_local = torch.tensor([0.0, 0.0, 1.0], device=R_pelvis.device)
+        d_fwd = R_pelvis @ z_local  # [3]
+
+        # Forward offset of head relative to pelvis
+        head_offset = p_head - p_pelvis  # [3]
+        delta_fwd = torch.dot(head_offset, d_fwd)  # scalar
+
+        # Hinge loss: penalize when delta_fwd > threshold
+        head_violation = F.relu(delta_fwd - self.head_fwd_thresh)
+        losses['head_fwd_loss'] = self.head_fwd_weight * head_violation ** 2
+
+        # ============================================
+        # Total Regularization Loss
+        # ============================================
+        losses['total_reg_loss'] = losses['upright_loss'] + losses['head_fwd_loss']
+
+        return losses
+
+
+def torso_upright_loss_numpy(
+    R_torso: np.ndarray,
+    thresh_deg: float = 25.0,
+    weight: float = 0.05
+) -> float:
+    """
+    NumPy version for non-differentiable use (e.g., analysis).
+
+    Args:
+        R_torso: [3, 3] rotation matrix of torso in world frame
+        thresh_deg: Threshold angle in degrees
+        weight: Loss weight
+
+    Returns:
+        Loss value (scalar)
+    """
+    y_local = np.array([0.0, 1.0, 0.0])
+    y_world = np.array([0.0, 1.0, 0.0])
+
+    u_torso = R_torso @ y_local
+    cos_theta = np.dot(u_torso, y_world)
+    cos_thresh = np.cos(np.radians(thresh_deg))
+
+    violation = max(0, cos_thresh - cos_theta)
+    return weight * violation ** 2
+
+
+def head_forward_loss_numpy(
+    p_head: np.ndarray,
+    p_pelvis: np.ndarray,
+    R_pelvis: np.ndarray,
+    thresh_m: float = 0.20,
+    weight: float = 0.05
+) -> float:
+    """
+    NumPy version for non-differentiable use.
+
+    Args:
+        p_head: [3] head position in world frame
+        p_pelvis: [3] pelvis position in world frame
+        R_pelvis: [3, 3] pelvis rotation matrix
+        thresh_m: Threshold in meters
+        weight: Loss weight
+
+    Returns:
+        Loss value (scalar)
+    """
+    z_local = np.array([0.0, 0.0, 1.0])
+    d_fwd = R_pelvis @ z_local
+
+    delta_fwd = np.dot(p_head - p_pelvis, d_fwd)
+
+    violation = max(0, delta_fwd - thresh_m)
+    return weight * violation ** 2
+\end{lstlisting}
+
+\section{Integration into Fitting Loop}
+
+\subsection{NimblePhysics Integration}
+
+\begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+import nimblephysics as nimble
+
+def fitting_step_with_regularization(
+    skel: nimble.dynamics.Skeleton,
+    pos: np.ndarray,
+    marker_obs: np.ndarray,
+    regularizer: TorsoRegularizer,
+):
+    """
+    Single fitting step with torso regularization.
+    """
+    # Set skeleton pose
+    skel.setPositions(pos)
+
+    # Get body transforms via forward kinematics
+    body_rotations = {}
+    body_positions = {}
+
+    for i in range(skel.getNumBodyNodes()):
+        body = skel.getBodyNode(i)
+        name = body.getName()
+        transform = body.getWorldTransform()
+
+        # Extract rotation and translation
+        body_rotations[name] = transform.rotation()  # [3, 3]
+        body_positions[name] = transform.translation()  # [3]
+
+    # Compute marker fitting loss
+    marker_pred = skel.getMarkerWorldPositions(...)
+    data_loss = np.sum((marker_pred - marker_obs) ** 2)
+
+    # Compute regularization losses (NumPy version)
+    upright_loss = torso_upright_loss_numpy(
+        body_rotations['torso'],
+        thresh_deg=25.0,
+        weight=0.05
+    )
+
+    head_fwd_loss = head_forward_loss_numpy(
+        body_positions['head'],
+        body_positions['pelvis'],
+        body_rotations['pelvis'],
+        thresh_m=0.20,
+        weight=0.05
+    )
+
+    # Total loss
+    total_loss = data_loss + upright_loss + head_fwd_loss
+
+    return total_loss, {
+        'data_loss': data_loss,
+        'upright_loss': upright_loss,
+        'head_fwd_loss': head_fwd_loss,
+    }
+\end{lstlisting}
+
+\subsection{PyTorch Differentiable Fitting}
+
+\begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+import torch
+
+class SkeletonFitter(torch.nn.Module):
+    def __init__(self, skeleton_model, regularizer: TorsoRegularizer):
+        super().__init__()
+        self.skeleton = skeleton_model
+        self.regularizer = regularizer
+
+    def forward(self, pose_params, marker_obs):
+        # Forward kinematics
+        body_transforms = self.skeleton.forward_kinematics(pose_params)
+
+        # Extract rotations and positions
+        body_rotations = {
+            name: T[:3, :3] for name, T in body_transforms.items()
+        }
+        body_positions = {
+            name: T[:3, 3] for name, T in body_transforms.items()
+        }
+
+        # Marker prediction
+        marker_pred = self.skeleton.get_markers(body_transforms)
+
+        # Data loss
+        data_loss = F.mse_loss(marker_pred, marker_obs)
+
+        # Regularization losses
+        reg_losses = self.regularizer.compute_losses(
+            body_rotations, body_positions
+        )
+
+        # Total loss
+        total_loss = data_loss + reg_losses['total_reg_loss']
+
+        return total_loss, {
+            'data_loss': data_loss.item(),
+            **{k: v.item() for k, v in reg_losses.items()}
+        }
+\end{lstlisting}
+
+\section{Practical Tips}
+
+\subsection{Avoiding Over-Regularization}
+
+\begin{enumerate}
+    \item \textbf{Start with small weights}: Begin with $\lambda = 0.01$ and increase only if collapse persists.
+
+    \item \textbf{Use generous thresholds}: Set $\theta_{\text{thresh}} = 25°$--$30°$ to allow natural forward lean during walking/running.
+
+    \item \textbf{Monitor loss components}: Track each loss separately to ensure regularization doesn't dominate:
+    \begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+if reg_loss > 0.5 * data_loss:
+    print("Warning: Regularization may be too strong")
+    \end{lstlisting}
+
+    \item \textbf{Motion-specific tuning}: Running naturally has more forward lean than walking. Consider:
+    \begin{itemize}
+        \item Walking: $\theta_{\text{thresh}} = 20°$, $\delta_{\text{thresh}} = 0.15$ m
+        \item Running: $\theta_{\text{thresh}} = 35°$, $\delta_{\text{thresh}} = 0.25$ m
+    \end{itemize}
+
+    \item \textbf{Annealing}: Start with higher weights and reduce over iterations:
+    \begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+weight = initial_weight * max(0.1, 1.0 - iter / max_iter)
+    \end{lstlisting}
+\end{enumerate}
+
+\subsection{Numerical Stability}
+
+\begin{enumerate}
+    \item \textbf{Clamp cosine values}: Prevent numerical issues with $\arccos$:
+    \begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+cos_theta = torch.clamp(cos_theta, -1.0 + 1e-7, 1.0 - 1e-7)
+    \end{lstlisting}
+
+    \item \textbf{Use smooth ReLU}: For better gradients near threshold:
+    \begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+def smooth_relu(x, beta=10.0):
+    return F.softplus(x * beta) / beta
+    \end{lstlisting}
+
+    \item \textbf{Normalize direction vectors}:
+    \begin{lstlisting}[language=Python, basicstyle=\ttfamily\small]
+d_fwd = d_fwd / (torch.norm(d_fwd) + 1e-8)
+    \end{lstlisting}
+\end{enumerate}
+
+\subsection{Body Name Mapping}
+
+Different skeleton models use different body names. Common mappings:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Concept & SKEL/OpenSim & SMPL \\
+\midrule
+Pelvis & pelvis, ground\_pelvis & pelvis \\
+Torso & torso, thorax, back & spine3 \\
+Head & head, skull & head \\
+\bottomrule
+\end{tabular}
+\caption{Body name mapping across skeleton models}
+\end{table}
+
+\section{Expected Behavior}
+
+\subsection{Without Regularization}
+\begin{itemize}
+    \item Torso pitch: 40°--60° forward (unrealistic collapse)
+    \item Head position: Far in front of pelvis
+    \item Visual: "Hunched over" appearance
+\end{itemize}
+
+\subsection{With Regularization}
+\begin{itemize}
+    \item Torso pitch: 0°--25° (natural upright with slight lean)
+    \item Head position: Roughly above pelvis with natural offset
+    \item Visual: Anatomically plausible posture
+\end{itemize}
+
+\section{Summary}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Loss & Formula & Recommended Parameters \\
+\midrule
+Torso Upright & $\lambda_1 \cdot \text{ReLU}(\cos\theta_{\text{thresh}} - \cos\theta)^2$ & $\theta_{\text{thresh}}=25°$, $\lambda_1=0.05$ \\
+Head Forward & $\lambda_2 \cdot \text{ReLU}(\delta_{\text{fwd}} - \delta_{\text{thresh}})^2$ & $\delta_{\text{thresh}}=0.20$ m, $\lambda_2=0.05$ \\
+\bottomrule
+\end{tabular}
+\caption{Summary of regularization losses}
+\end{table}
+
+Key properties:
+\begin{itemize}
+    \item \textbf{Soft}: Does not hard-constrain any DOFs
+    \item \textbf{One-sided}: Only penalizes excessive forward lean, not backward
+    \item \textbf{Differentiable}: Compatible with gradient-based optimization
+    \item \textbf{Configurable}: Thresholds and weights can be tuned per motion type
+\end{itemize}
+
+\end{document}

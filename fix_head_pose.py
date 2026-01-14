@@ -173,6 +173,7 @@ def export_skeleton_objs(
     prefix: str = "fixed",
     gender: str = "male",
     export_skin: bool = True,
+    fill_spine_gap: bool = True,
 ):
     """Export skeleton and skin OBJ files using SKEL model."""
     import torch
@@ -189,6 +190,11 @@ def export_skeleton_objs(
     T = poses.shape[0]
 
     print(f"\n[Export] Generating {T} skeleton" + (" + skin" if export_skin else "") + " OBJ files...")
+    if fill_spine_gap:
+        print("  (with spine gap filling)")
+        from spine_bridge import fill_gap_bidirectional
+        skel_weights = skel.model.skel_weights.to_dense().cpu().numpy()
+        dominant_joints = np.argmax(skel_weights, axis=1)
 
     poses_t = torch.from_numpy(poses).float().to(device)
     betas_t = torch.from_numpy(betas).float().to(device)
@@ -212,6 +218,11 @@ def export_skeleton_objs(
 
             # Get skeleton vertices
             skel_verts = output.skel_verts[0].cpu().numpy()
+
+            # Fill spine gap if requested
+            if fill_spine_gap:
+                skel_verts = fill_gap_bidirectional(skel_verts, dominant_joints)
+
             obj_path = os.path.join(output_dir, f"{prefix}_skeleton_{i:04d}.obj")
             _write_obj(obj_path, skel_verts, skel_faces)
 
@@ -249,6 +260,7 @@ def main():
     parser.add_argument("--head-offset", type=float, default=8.0, help="Head extension offset (degrees, + = upright, default: 8)")
     parser.add_argument("--export-obj", action="store_true", help="Export skeleton OBJ files")
     parser.add_argument("--gender", default="male", choices=["male", "female"], help="Gender")
+    parser.add_argument("--no-spine-fix", action="store_true", help="Disable spine gap filling")
 
     args = parser.parse_args()
 
@@ -314,6 +326,7 @@ def main():
             output_dir=args.output,
             prefix="fixed",
             gender=args.gender,
+            fill_spine_gap=not args.no_spine_fix,
         )
 
 

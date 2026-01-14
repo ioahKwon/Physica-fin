@@ -38,7 +38,12 @@ sys.path.insert(0, '/egr/research-zijunlab/kwonjoon/01_Code/Physica/AddB_to_SMPL
 
 from skel_force_vis.fix_head_pose import fix_spine_poses, fix_head_poses, analyze_poses
 from skel_force_vis.visualizer import SKELForceVisualizer
-from skel_force_vis.colormaps import torque_to_color_plasma
+from skel_force_vis.colormaps import torque_to_color_plasma, torque_to_color_green
+
+COLORMAPS = {
+    'plasma': torque_to_color_plasma,
+    'green': torque_to_color_green,
+}
 
 
 # Default paths
@@ -212,6 +217,10 @@ def run_force_visualization(
     gender: str = "male",
     max_torque: float = 300.0,
     verbose: bool = True,
+    coloring_mode: str = "lbs_blend",
+    smooth_sigma: float = 0.02,
+    distance_falloff: float = 0.1,
+    colormap_name: str = "plasma",
 ):
     """
     Run force visualization on corrected meshes.
@@ -223,26 +232,36 @@ def run_force_visualization(
         gender: "male" or "female"
         max_torque: Max torque for colormap normalization
         verbose: Print progress
+        coloring_mode: 'lbs_blend', 'gaussian', or 'distance'
+        smooth_sigma: Sigma for Gaussian smoothing (meters)
+        distance_falloff: Falloff for distance-based gradient (meters)
+        colormap_name: 'plasma' or 'green'
     """
     # Input for force data (from skel_force_vis output, has frame_XXXX folders with force_data.json)
     input_base = os.path.join(SKEL_FORCE_VIS_OUTPUT, subject_name)
+
+    colormap_func = COLORMAPS.get(colormap_name, torque_to_color_plasma)
 
     if verbose:
         print(f"\nRunning force visualization...")
         print(f"  Force data: {input_base}")
         print(f"  Mesh override: {mesh_dir}")
         print(f"  Output: {output_dir}")
+        print(f"  Colormap: {colormap_name}")
 
     vis = SKELForceVisualizer(
         input_base=input_base,
         output_dir=output_dir,
-        colormap=torque_to_color_plasma,
+        colormap=colormap_func,
         max_torque=max_torque,
         skel_model_path=SKEL_MODEL_PATH,
         gender=gender,
         use_lbs_coloring=True,
         unit_arrow_length=0.05,
         mesh_override_dir=mesh_dir,  # Use corrected meshes
+        coloring_mode=coloring_mode,
+        smooth_sigma=smooth_sigma,
+        distance_falloff=distance_falloff,
     )
 
     vis.process_all_frames(verbose=verbose)
@@ -311,6 +330,30 @@ def main():
         action="store_true",
         help="Suppress progress output"
     )
+    parser.add_argument(
+        "--coloring-mode",
+        choices=["lbs_blend", "gaussian", "distance", "hotspot"],
+        default="lbs_blend",
+        help="Vertex coloring method: lbs_blend (default), gaussian, distance, hotspot"
+    )
+    parser.add_argument(
+        "--smooth-sigma",
+        type=float,
+        default=0.02,
+        help="Sigma for Gaussian smoothing in meters (default: 0.02)"
+    )
+    parser.add_argument(
+        "--distance-falloff",
+        type=float,
+        default=0.1,
+        help="Falloff for distance-based gradient in meters (default: 0.1)"
+    )
+    parser.add_argument(
+        "--colormap",
+        choices=["plasma", "green"],
+        default="plasma",
+        help="Colormap: plasma (purple->yellow), green (dark teal->lime)"
+    )
 
     args = parser.parse_args()
     verbose = not args.quiet
@@ -356,6 +399,10 @@ def main():
             gender=args.gender,
             max_torque=args.max_torque,
             verbose=verbose,
+            coloring_mode=args.coloring_mode,
+            smooth_sigma=args.smooth_sigma,
+            distance_falloff=args.distance_falloff,
+            colormap_name=args.colormap,
         )
 
         if verbose:

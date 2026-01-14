@@ -11,7 +11,7 @@ Usage:
 
 import argparse
 from .visualizer import SKELForceVisualizer
-from .colormaps import torque_to_color_plasma, torque_to_color_jet
+from .colormaps import torque_to_color_plasma, torque_to_color_jet, torque_to_color_dark_purple
 
 
 def main():
@@ -30,9 +30,9 @@ def main():
     )
     parser.add_argument(
         "--colormap", "-c",
-        choices=["plasma", "jet"],
-        default="plasma",
-        help="Colormap for torque visualization (default: plasma)"
+        choices=["plasma", "jet", "dark_purple"],
+        default="dark_purple",
+        help="Colormap for torque visualization (default: dark_purple)"
     )
     parser.add_argument(
         "--max-torque",
@@ -109,7 +109,12 @@ def main():
     args = parser.parse_args()
 
     # Select colormap
-    colormap = torque_to_color_plasma if args.colormap == "plasma" else torque_to_color_jet
+    if args.colormap == "plasma":
+        colormap = torque_to_color_plasma
+    elif args.colormap == "jet":
+        colormap = torque_to_color_jet
+    else:  # dark_purple (default)
+        colormap = torque_to_color_dark_purple
 
     # Create visualizer
     vis = SKELForceVisualizer(

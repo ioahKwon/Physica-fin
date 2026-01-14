@@ -8,10 +8,11 @@ import glob
 import numpy as np
 from typing import Dict, List, Optional, Callable, Tuple
 
-from .colormaps import torque_to_color_plasma, AXIS_COLORS
+from .colormaps import torque_to_color_plasma, torque_to_color_dark_purple, AXIS_COLORS
 
-# GRF arrow color (bright red)
-GRF_COLOR = (1.0, 0.2, 0.2)
+# GRF arrow colors (lime shaft, red head)
+GRF_SHAFT_COLOR = (0.5, 1.0, 0.3)  # Lime/neon green
+GRF_HEAD_COLOR = (1.0, 0.2, 0.2)   # Red endpoint
 from .mesh_utils import (
     create_line_mesh,
     create_sphere_mesh,
@@ -63,11 +64,15 @@ class SKELForceVisualizer:
         gender: str = 'male',
         use_lbs_coloring: bool = True,
         show_grf: bool = True,
-        grf_scale: float = 0.001,
-        grf_radius: float = 0.008,
-        grf_color: tuple = GRF_COLOR,
+        grf_scale: float = 0.0005,
+        grf_radius: float = 0.005,
+        grf_shaft_color: tuple = GRF_SHAFT_COLOR,
+        grf_head_color: tuple = GRF_HEAD_COLOR,
         unit_arrow_length: float = 0.05,
         mesh_override_dir: Optional[str] = None,
+        coloring_mode: str = 'lbs_blend',
+        smooth_sigma: float = 0.02,
+        distance_falloff: float = 0.1,
     ):
         """
         Initialize the visualizer.
@@ -88,15 +93,24 @@ class SKELForceVisualizer:
             show_grf: If True, visualize Ground Reaction Force arrows
             grf_scale: Scale factor for GRF arrow length (m per N)
             grf_radius: Radius of GRF arrow cylinder (m)
-            grf_color: RGB color for GRF arrows
+            grf_shaft_color: RGB color for GRF arrow shaft (cylinder)
+            grf_head_color: RGB color for GRF arrow head (sphere)
             unit_arrow_length: Fixed arrow length for torque vectors (m). If >0, arrows are unit vectors.
             mesh_override_dir: Optional directory containing corrected skeleton/body meshes
+            coloring_mode: Vertex coloring method:
+                - 'lbs_blend': LBS weight-based color blending (default)
+                - 'gaussian': Spatial Gaussian smoothing of colors
+                - 'distance': Distance-based gradient from joint positions
+            smooth_sigma: Sigma for Gaussian smoothing (meters), used when coloring_mode='gaussian'
+            distance_falloff: Falloff distance for distance-based gradient (meters), used when coloring_mode='distance'
         """
         self.input_base = input_base
         self.mesh_override_dir = mesh_override_dir
         self.output_dir = output_dir
         self.colormap = colormap
         self.max_torque = max_torque
+        self.torque_min = 0.0  # Will be updated by _scan_torque_range
+        self.torque_max = max_torque  # Will be updated by _scan_torque_range
         self.line_scale = line_scale
         self.line_radius = line_radius
         self.sphere_radius = sphere_radius
@@ -108,8 +122,12 @@ class SKELForceVisualizer:
         self.show_grf = show_grf
         self.grf_scale = grf_scale
         self.grf_radius = grf_radius
-        self.grf_color = grf_color
+        self.grf_shaft_color = grf_shaft_color
+        self.grf_head_color = grf_head_color
         self.unit_arrow_length = unit_arrow_length
+        self.coloring_mode = coloring_mode
+        self.smooth_sigma = smooth_sigma
+        self.distance_falloff = distance_falloff
 
         # Load LBS weights for proper bone segmentation
         self.template_dominant_joints = None
@@ -199,6 +217,13 @@ class SKELForceVisualizer:
             skeleton_vertex_colors, lines_data, grf_data
         )
 
+        # Write combined PLY (better vertex color support in viewers)
+        ply_path = os.path.join(self.output_dir, f"{frame_name}_skeleton_axes.ply")
+        self._write_combined_ply(
+            ply_path, skeleton_vertices, skeleton_faces,
+            skeleton_vertex_colors, lines_data, grf_data
+        )
+
         # Write body mesh if exists
         if os.path.exists(body_mesh_path):
             body_vertices, body_faces = read_obj_mesh(body_mesh_path)
@@ -232,6 +257,9 @@ class SKELForceVisualizer:
         if verbose:
             print(f"Found {len(frame_dirs)} frames")
 
+        # First pass: scan all frames to find global torque range
+        self._scan_torque_range(frame_dirs, verbose)
+
         results = []
         for frame_dir in frame_dirs:
             result = self.process_frame(frame_dir)
@@ -246,6 +274,38 @@ class SKELForceVisualizer:
 
         return results
 
+    def _scan_torque_range(self, frame_dirs: List[str], verbose: bool = True):
+        """
+        Scan all frames to find global min/max torque for colormap normalization.
+        This ensures consistent coloring across the entire sequence.
+        """
+        all_torques = []
+
+        for frame_dir in frame_dirs:
+            force_file = os.path.join(frame_dir, "force_data.json")
+            if os.path.exists(force_file):
+                try:
+                    with open(force_file, 'r') as f:
+                        force_data = json.load(f)
+                    # Extract magnitudes from joint_torques array
+                    for joint_data in force_data.get("joint_torques", []):
+                        magnitude = joint_data.get("magnitude", 0)
+                        if magnitude > 0.5:  # Skip negligible torques
+                            all_torques.append(magnitude)
+                except:
+                    continue
+
+        if len(all_torques) > 0:
+            self.torque_min = np.min(all_torques)
+            self.torque_max = np.max(all_torques)
+            if verbose:
+                print(f"Global torque range: {self.torque_min:.1f} - {self.torque_max:.1f} Nm")
+        else:
+            self.torque_min = 0.0
+            self.torque_max = 300.0  # Default fallback
+            if verbose:
+                print("No torque data found, using default range 0-300 Nm")
+
     def _compute_vertex_colors(
         self,
         vertices: np.ndarray,
@@ -256,14 +316,23 @@ class SKELForceVisualizer:
         """
         Compute vertex colors based on joint torque.
 
-        If LBS weights are loaded, uses proper bone segmentation (each bone colored
-        by its controlling joint's torque). Otherwise falls back to nearest-joint.
+        Supports multiple coloring modes:
+        - 'lbs_blend': LBS weight-based color blending
+        - 'gaussian': Spatial Gaussian smoothing
+        - 'distance': Distance-based gradient from joints
+        - 'hotspot': Joint-only hotspot visualization (like pain relief ads)
         """
         if len(joint_positions) == 0:
             return [(0.8, 0.8, 0.8)] * len(vertices)
 
-        # Use LBS-based coloring if available
-        if self.template_dominant_joints is not None and self.use_lbs_coloring:
+        # Choose coloring method based on mode
+        if self.coloring_mode == 'gaussian':
+            return self._compute_vertex_colors_gaussian(vertices, joint_positions, joint_torques, faces)
+        elif self.coloring_mode == 'distance':
+            return self._compute_vertex_colors_distance(vertices, joint_positions, joint_torques)
+        elif self.coloring_mode == 'hotspot':
+            return self._compute_vertex_colors_hotspot(vertices, joint_positions, joint_torques)
+        elif self.template_dominant_joints is not None and self.use_lbs_coloring:
             return self._compute_vertex_colors_lbs(vertices, joint_torques, faces=faces)
 
         # Fallback: nearest joint coloring
@@ -276,64 +345,119 @@ class SKELForceVisualizer:
         faces: np.ndarray = None
     ) -> List[tuple]:
         """
-        Compute vertex colors using LBS weights for proper bone segmentation.
+        Compute vertex colors using LBS weights with weighted blending.
 
-        Each vertex is colored based on its dominant joint (from skinning weights).
-        This ensures each bone segment is uniformly colored by its controlling joint.
+        Each vertex color is computed as a weighted blend of all joint colors,
+        where weights come from the LBS skinning weights. This creates smooth
+        gradients across the mesh similar to PhysPT visualization.
+
+        Formula: color_v = Σ_j (w_vj * colormap(torque_j))
 
         Handles mesh with deduplicated vertices by using face-based mapping.
         """
         num_vertices = len(vertices)
-        num_template_vertices = len(self.template_dominant_joints)
-
-        # Get dominant joints for this mesh
-        if num_vertices == num_template_vertices:
-            # Direct correspondence - use template dominant joints
-            dominant_joints = self.template_dominant_joints
-        else:
-            # Mesh has different vertex count - need to compute mapping
-            # Use face count as cache key (more specific than vertex count)
-            cache_key = (num_vertices, len(faces) if faces is not None else 0)
-            if cache_key in self._mesh_dominant_joints_cache:
-                dominant_joints = self._mesh_dominant_joints_cache[cache_key]
-            else:
-                print(f"Computing vertex mapping for {num_vertices} vertices...")
-                dominant_joints = get_dominant_joints_for_mesh(
-                    vertices, self.skel_model_path, self.gender, mesh_faces=faces
-                )
-                self._mesh_dominant_joints_cache[cache_key] = dominant_joints
-                print(f"Vertex mapping computed and cached.")
+        num_template_vertices = len(self.template_vertices) if self.template_vertices is not None else 0
 
         # Build mapping from SKEL joint index to torque value
-        # joint_torques uses AddBiomechanics names, need to map to SKEL indices
-        # Note: Some AddB joints map to multiple SKEL joints (e.g., 'back' -> lumbar, thorax, head)
-        skel_idx_to_torque = {}
+        skel_idx_to_torque = np.zeros(24)  # 24 SKEL joints
         for addb_name, torque in joint_torques.items():
             skel_indices = ADDB_TO_SKEL_JOINT_MAP.get(addb_name)
             if skel_indices is not None:
                 for skel_idx in skel_indices:
-                    # If multiple AddB joints map to same SKEL joint, take max torque
-                    if skel_idx not in skel_idx_to_torque or torque > skel_idx_to_torque[skel_idx]:
+                    if torque > skel_idx_to_torque[skel_idx]:
                         skel_idx_to_torque[skel_idx] = torque
 
         # Apply parent joint fallback for joints without torque data
-        # This handles cases where AddBiomechanics doesn't provide certain joint torques
         for addb_name, parent_addb_name in ADDB_PARENT_FALLBACK.items():
             skel_indices = ADDB_TO_SKEL_JOINT_MAP.get(addb_name)
             if skel_indices is None:
                 continue
-            # Check if any of these SKEL joints are missing torque data
             for skel_idx in skel_indices:
-                if skel_idx not in skel_idx_to_torque or skel_idx_to_torque[skel_idx] == 0:
-                    # Try to get parent's torque (with recursive fallback)
+                if skel_idx_to_torque[skel_idx] == 0:
                     parent_name = parent_addb_name
                     parent_torque = joint_torques.get(parent_name, 0)
-                    # Follow fallback chain if parent also missing
                     while parent_torque == 0 and parent_name in ADDB_PARENT_FALLBACK:
                         parent_name = ADDB_PARENT_FALLBACK[parent_name]
                         parent_torque = joint_torques.get(parent_name, 0)
                     if parent_torque > 0:
                         skel_idx_to_torque[skel_idx] = parent_torque
+
+        # Precompute colors for each joint (using global min/max range)
+        joint_colors = np.array([
+            self.colormap(t, self.torque_max, self.torque_min) for t in skel_idx_to_torque
+        ])
+
+        # Get LBS weights for vertices
+        if self.lbs_weights is not None and num_vertices == num_template_vertices:
+            # Direct correspondence - use template LBS weights
+            lbs_weights = self.lbs_weights
+        elif self.lbs_weights is not None:
+            # Different vertex count - need to map weights
+            cache_key = (num_vertices, len(faces) if faces is not None else 0, "weights")
+            if cache_key in self._mesh_dominant_joints_cache:
+                lbs_weights = self._mesh_dominant_joints_cache[cache_key]
+            else:
+                print(f"Computing LBS weight mapping for {num_vertices} vertices...")
+                lbs_weights = self._map_lbs_weights_to_mesh(vertices, faces)
+                self._mesh_dominant_joints_cache[cache_key] = lbs_weights
+                print(f"LBS weight mapping computed and cached.")
+        else:
+            # No LBS weights - fallback to dominant joint only
+            return self._compute_vertex_colors_lbs_dominant(vertices, joint_torques, faces)
+
+        # Compute blended colors using LBS weights
+        # color_v = Σ_j (w_vj * color_j) for all joints j
+        colors = []
+        for v_idx in range(num_vertices):
+            if v_idx < len(lbs_weights):
+                weights = lbs_weights[v_idx]  # Shape: (24,)
+                # Weighted blend of all joint colors
+                blended_color = np.zeros(3)
+                weight_sum = 0.0
+                for j in range(24):
+                    if weights[j] > 0.01:  # Skip negligible weights
+                        blended_color += weights[j] * np.array(joint_colors[j])
+                        weight_sum += weights[j]
+                if weight_sum > 0:
+                    blended_color /= weight_sum
+                else:
+                    blended_color = np.array([0.8, 0.8, 0.8])
+                colors.append(tuple(blended_color))
+            else:
+                colors.append((0.8, 0.8, 0.8))
+
+        return colors
+
+    def _compute_vertex_colors_lbs_dominant(
+        self,
+        vertices: np.ndarray,
+        joint_torques: Dict[str, float],
+        faces: np.ndarray = None
+    ) -> List[tuple]:
+        """
+        Fallback: Compute vertex colors using dominant joint only (no blending).
+        Used when LBS weights are not available.
+        """
+        num_vertices = len(vertices)
+
+        # Build mapping from SKEL joint index to torque value
+        skel_idx_to_torque = {}
+        for addb_name, torque in joint_torques.items():
+            skel_indices = ADDB_TO_SKEL_JOINT_MAP.get(addb_name)
+            if skel_indices is not None:
+                for skel_idx in skel_indices:
+                    if skel_idx not in skel_idx_to_torque or torque > skel_idx_to_torque[skel_idx]:
+                        skel_idx_to_torque[skel_idx] = torque
+
+        # Get dominant joints
+        cache_key = (num_vertices, len(faces) if faces is not None else 0)
+        if cache_key in self._mesh_dominant_joints_cache:
+            dominant_joints = self._mesh_dominant_joints_cache[cache_key]
+        else:
+            dominant_joints = get_dominant_joints_for_mesh(
+                vertices, self.skel_model_path, self.gender, mesh_faces=faces
+            )
+            self._mesh_dominant_joints_cache[cache_key] = dominant_joints
 
         colors = []
         for v_idx in range(num_vertices):
@@ -341,13 +465,36 @@ class SKELForceVisualizer:
                 joint_idx = dominant_joints[v_idx]
                 torque = skel_idx_to_torque.get(joint_idx, 0)
             else:
-                # Fallback for vertices beyond LBS weight coverage
                 torque = 0
-
             color = self.colormap(torque, self.max_torque)
             colors.append(color)
 
         return colors
+
+    def _map_lbs_weights_to_mesh(
+        self,
+        vertices: np.ndarray,
+        faces: np.ndarray
+    ) -> np.ndarray:
+        """
+        Map LBS weights from template mesh to a mesh with different vertex count.
+        Uses nearest neighbor matching in template space.
+        """
+        from scipy.spatial import cKDTree
+
+        if self.template_vertices is None or self.lbs_weights is None:
+            return None
+
+        # Build KD-tree from template vertices
+        tree = cKDTree(self.template_vertices)
+
+        # Find nearest template vertex for each mesh vertex
+        _, indices = tree.query(vertices)
+
+        # Map weights
+        mapped_weights = self.lbs_weights[indices]
+
+        return mapped_weights
 
     def _compute_vertex_colors_nearest(
         self,
@@ -367,6 +514,172 @@ class SKELForceVisualizer:
             torque_mag = joint_torques.get(nearest_joint, 0)
             color = self.colormap(torque_mag, self.max_torque)
             colors.append(color)
+
+        return colors
+
+    def _compute_vertex_colors_gaussian(
+        self,
+        vertices: np.ndarray,
+        joint_positions: Dict[str, np.ndarray],
+        joint_torques: Dict[str, float],
+        faces: np.ndarray = None
+    ) -> List[tuple]:
+        """
+        Compute vertex colors with spatial Gaussian smoothing.
+
+        First computes base colors using LBS weights, then applies Gaussian
+        smoothing based on vertex distances to create smooth gradients.
+        """
+        from scipy.spatial import cKDTree
+
+        # First compute base colors using LBS
+        if self.template_dominant_joints is not None and self.use_lbs_coloring:
+            base_colors = self._compute_vertex_colors_lbs(vertices, joint_torques, faces=faces)
+        else:
+            base_colors = self._compute_vertex_colors_nearest(vertices, joint_positions, joint_torques)
+
+        base_colors = np.array(base_colors)
+        num_vertices = len(vertices)
+
+        # Build KD-tree for spatial queries
+        tree = cKDTree(vertices)
+
+        # Gaussian smoothing
+        sigma = self.smooth_sigma
+        smoothed_colors = np.zeros_like(base_colors)
+
+        # For each vertex, find neighbors within 3*sigma and compute weighted average
+        search_radius = 3 * sigma
+        for i in range(num_vertices):
+            neighbor_indices = tree.query_ball_point(vertices[i], search_radius)
+            if len(neighbor_indices) == 0:
+                smoothed_colors[i] = base_colors[i]
+                continue
+
+            # Compute Gaussian weights
+            neighbor_verts = vertices[neighbor_indices]
+            distances = np.linalg.norm(neighbor_verts - vertices[i], axis=1)
+            weights = np.exp(-distances**2 / (2 * sigma**2))
+            weights /= weights.sum()
+
+            # Weighted average of colors
+            neighbor_colors = base_colors[neighbor_indices]
+            smoothed_colors[i] = np.sum(weights[:, np.newaxis] * neighbor_colors, axis=0)
+
+        return [tuple(c) for c in smoothed_colors]
+
+    def _compute_vertex_colors_distance(
+        self,
+        vertices: np.ndarray,
+        joint_positions: Dict[str, np.ndarray],
+        joint_torques: Dict[str, float]
+    ) -> List[tuple]:
+        """
+        Compute vertex colors using distance-based gradient from joint positions.
+
+        Each vertex color is a weighted blend of all joint colors, where weights
+        are inversely proportional to distance (with exponential falloff).
+        This creates smooth gradients radiating from joint positions.
+
+        Formula: color_v = Σ_j (w_vj * colormap(torque_j)) / Σ_j (w_vj)
+        where w_vj = exp(-dist(v, j) / falloff)
+        """
+        joint_names = list(joint_positions.keys())
+        if len(joint_names) == 0:
+            return [(0.8, 0.8, 0.8)] * len(vertices)
+
+        joint_pos_array = np.array([joint_positions[name] for name in joint_names])
+        joint_torque_array = np.array([joint_torques.get(name, 0) for name in joint_names])
+
+        # Precompute colors for each joint
+        joint_colors = np.array([self.colormap(t, self.max_torque) for t in joint_torque_array])
+
+        falloff = self.distance_falloff
+        colors = []
+
+        for vertex in vertices:
+            # Compute distance to each joint
+            distances = np.linalg.norm(joint_pos_array - vertex, axis=1)
+
+            # Exponential falloff weights
+            weights = np.exp(-distances / falloff)
+
+            # Normalize weights
+            weight_sum = weights.sum()
+            if weight_sum > 0:
+                weights /= weight_sum
+            else:
+                colors.append((0.8, 0.8, 0.8))
+                continue
+
+            # Weighted blend of joint colors
+            blended_color = np.sum(weights[:, np.newaxis] * joint_colors, axis=0)
+            colors.append(tuple(blended_color))
+
+        return colors
+
+    def _compute_vertex_colors_hotspot(
+        self,
+        vertices: np.ndarray,
+        joint_positions: Dict[str, np.ndarray],
+        joint_torques: Dict[str, float]
+    ) -> List[tuple]:
+        """
+        Compute vertex colors with hotspot visualization at joint locations.
+
+        Background is bone color, joints glow red/orange/yellow based on torque.
+        Uses Gaussian falloff for smooth blending.
+        """
+        joint_names = list(joint_positions.keys())
+        if len(joint_names) == 0:
+            return [(0.85, 0.82, 0.75)] * len(vertices)  # Bone color
+
+        joint_pos_array = np.array([joint_positions[name] for name in joint_names])
+        joint_torque_array = np.array([joint_torques.get(name, 0) for name in joint_names])
+
+        # Background color (slightly darker bone for better contrast)
+        bg_color = np.array([0.75, 0.72, 0.65])
+
+        # Hotspot colors (yellow -> red, low to high torque)
+        def torque_to_hotspot_color(torque, max_torque=300.0):
+            if torque < 1.0:
+                return None  # No hotspot
+            t = np.log10(torque + 1) / np.log10(max_torque + 1)
+            t = np.clip(t, 0, 1)
+            # Red to Yellow gradient (low torque = red, high torque = bright yellow)
+            colors = [
+                np.array([0.95, 0.0, 0.0]),   # 0.0 - vivid red
+                np.array([1.0, 0.3, 0.0]),    # 0.33 - red-orange
+                np.array([1.0, 0.6, 0.0]),    # 0.66 - orange
+                np.array([1.0, 0.95, 0.3]),   # 1.0 - bright yellow
+            ]
+            idx = t * 3
+            i = int(idx)
+            if i >= 3:
+                return colors[3]
+            frac = idx - i
+            return colors[i] * (1 - frac) + colors[i + 1] * frac
+
+        # Hotspot radius (how far the glow extends)
+        hotspot_radius = 0.15  # 15cm radius
+
+        colors = []
+        for vertex in vertices:
+            # Compute distance to each joint
+            distances = np.linalg.norm(joint_pos_array - vertex, axis=1)
+
+            # Find if any joint is close enough for hotspot effect
+            final_color = bg_color.copy()
+            for j, (dist, torque) in enumerate(zip(distances, joint_torque_array)):
+                if dist < hotspot_radius and torque > 1.0:
+                    hotspot_color = torque_to_hotspot_color(torque, self.max_torque)
+                    if hotspot_color is not None:
+                        # Gaussian falloff from joint center
+                        intensity = np.exp(-(dist / (hotspot_radius / 2.5)) ** 2)
+                        # Blend hotspot color with current color
+                        final_color = final_color * (1 - intensity) + hotspot_color * intensity
+
+            colors.append(tuple(np.clip(final_color, 0, 1)))
 
         return colors
 
@@ -521,7 +834,7 @@ class SKELForceVisualizer:
             arrow_length = magnitude * self.grf_scale
             end_pos = cop + force_dir * arrow_length
 
-            # Create arrow shaft (cylinder)
+            # Create arrow shaft (cylinder) - lime/neon green
             shaft_verts, shaft_faces = create_line_mesh(
                 start=cop,
                 end=end_pos,
@@ -530,9 +843,9 @@ class SKELForceVisualizer:
             )
 
             if len(shaft_verts) > 0:
-                grf_data.append((shaft_verts, shaft_faces, self.grf_color))
+                grf_data.append((shaft_verts, shaft_faces, self.grf_shaft_color))
 
-            # Create arrow head (larger sphere at the end)
+            # Create arrow head (larger sphere at the end) - red
             head_verts, head_faces = create_sphere_mesh(
                 center=end_pos,
                 radius=self.grf_radius * 2.0,
@@ -541,7 +854,7 @@ class SKELForceVisualizer:
             )
 
             if len(head_verts) > 0:
-                grf_data.append((head_verts, head_faces, self.grf_color))
+                grf_data.append((head_verts, head_faces, self.grf_head_color))
 
         return grf_data
 
@@ -557,9 +870,9 @@ class SKELForceVisualizer:
         """Write combined skeleton + axes + GRF OBJ file."""
         with open(filepath, 'w') as f:
             f.write("# SKEL skeleton mesh + 3-axis torque lines + GRF arrows\n")
-            f.write("# Skeleton: colored by joint torque magnitude\n")
-            f.write("# Axes: X=Pink, Y=Neon Green, Z=Cyan (with endpoint balls)\n")
-            f.write("# GRF: Red arrows from CoP in force direction\n")
+            f.write("# Skeleton: dark purple gradient by joint torque magnitude\n")
+            f.write("# Axes: X=Red, Y=Blue, Z=Yellow (with endpoint balls)\n")
+            f.write("# GRF: Lime shaft + Red head arrows from CoP\n")
 
             vertex_offset = 0
 
@@ -601,6 +914,79 @@ class SKELForceVisualizer:
 
                     vertex_offset += len(grf_verts)
 
+    def _write_combined_ply(
+        self,
+        filepath: str,
+        skeleton_vertices: np.ndarray,
+        skeleton_faces: np.ndarray,
+        skeleton_colors: List[tuple],
+        lines_data: List[tuple],
+        grf_data: List[tuple] = None
+    ) -> None:
+        """Write combined skeleton + axes + GRF PLY file with vertex colors."""
+        # Collect all vertices, faces, and colors
+        all_vertices = []
+        all_faces = []
+        all_colors = []
+        vertex_offset = 0
+
+        # Skeleton mesh
+        for i, v in enumerate(skeleton_vertices):
+            all_vertices.append(v)
+            all_colors.append(skeleton_colors[i])
+        for face in skeleton_faces:
+            all_faces.append([face[0], face[1], face[2]])
+        vertex_offset = len(skeleton_vertices)
+
+        # Axis lines and spheres
+        for line_verts, line_faces, line_color in lines_data:
+            if len(line_verts) == 0:
+                continue
+            for v in line_verts:
+                all_vertices.append(v)
+                all_colors.append(line_color)
+            for face in line_faces:
+                all_faces.append([face[0] + vertex_offset, face[1] + vertex_offset, face[2] + vertex_offset])
+            vertex_offset += len(line_verts)
+
+        # GRF arrows
+        if grf_data:
+            for grf_verts, grf_faces, grf_color in grf_data:
+                if len(grf_verts) == 0:
+                    continue
+                for v in grf_verts:
+                    all_vertices.append(v)
+                    all_colors.append(grf_color)
+                for face in grf_faces:
+                    all_faces.append([face[0] + vertex_offset, face[1] + vertex_offset, face[2] + vertex_offset])
+                vertex_offset += len(grf_verts)
+
+        # Write PLY file
+        with open(filepath, 'w') as f:
+            f.write("ply\n")
+            f.write("format ascii 1.0\n")
+            f.write(f"element vertex {len(all_vertices)}\n")
+            f.write("property float x\n")
+            f.write("property float y\n")
+            f.write("property float z\n")
+            f.write("property uchar red\n")
+            f.write("property uchar green\n")
+            f.write("property uchar blue\n")
+            f.write(f"element face {len(all_faces)}\n")
+            f.write("property list uchar int vertex_indices\n")
+            f.write("end_header\n")
+
+            # Write vertices with colors (0-255 range)
+            for v, c in zip(all_vertices, all_colors):
+                r = int(c[0] * 255)
+                g = int(c[1] * 255)
+                b = int(c[2] * 255)
+                f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {r} {g} {b}\n")
+
+            # Write faces
+            for face in all_faces:
+                f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+
     def _write_force_summary(
         self,
         filepath: str,
@@ -613,8 +999,8 @@ class SKELForceVisualizer:
             f.write("=" * 60 + "\n")
             f.write(f"{frame_name} - Joint Torque Summary\n")
             f.write("=" * 60 + "\n\n")
-            f.write("Skeleton: colored by joint torque magnitude\n")
-            f.write("Axes: X=Pink, Y=Neon Green, Z=Cyan (with endpoint balls)\n\n")
+            f.write("Skeleton: dark purple gradient by joint torque magnitude\n")
+            f.write("Axes: X=Red, Y=Blue, Z=Yellow (with endpoint balls)\n\n")
 
             sorted_joints = sorted(joint_torques.items(), key=lambda x: x[1], reverse=True)
             for joint_name, torque in sorted_joints:
