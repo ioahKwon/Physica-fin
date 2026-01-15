@@ -21,8 +21,8 @@ Usage:
     # Custom pose corrections
     python -m skel_force_vis.generate_visualization \
         --subject Falisse2017_subject_1 \
-        --thorax-offset 15 \
-        --head-offset 10
+        --thorax-offset 5 \
+        --head-offset 5
 """
 
 import os
@@ -55,8 +55,8 @@ SKEL_MODEL_PATH = "/egr/research-zijunlab/kwonjoon/02_Dataset/skel_models_v1.1"
 def generate_corrected_meshes(
     subject_name: str,
     output_dir: str,
-    thorax_offset: float = 15.0,
-    head_offset: float = 8.0,
+    thorax_offset: float = 5.0,
+    head_offset: float = 5.0,
     lumbar_offset: float = 0.0,
     gender: str = "male",
     frame_indices: list = None,
@@ -68,8 +68,8 @@ def generate_corrected_meshes(
     Args:
         subject_name: Name of subject (e.g., "Falisse2017_subject_1")
         output_dir: Output directory
-        thorax_offset: Thorax extension offset in degrees (default: 15)
-        head_offset: Head extension offset in degrees (default: 8)
+        thorax_offset: Thorax extension offset in degrees (default: 5)
+        head_offset: Head extension offset in degrees (default: 5)
         lumbar_offset: Lumbar extension offset in degrees (default: 0)
         gender: "male" or "female"
         frame_indices: List of frame indices to process, or None for all
@@ -285,14 +285,14 @@ def main():
     parser.add_argument(
         "--thorax-offset",
         type=float,
-        default=15.0,
-        help="Thorax extension offset in degrees (default: 15)"
+        default=5.0,
+        help="Thorax extension offset in degrees (default: 5)"
     )
     parser.add_argument(
         "--head-offset",
         type=float,
-        default=8.0,
-        help="Head extension offset in degrees (default: 8)"
+        default=5.0,
+        help="Head extension offset in degrees (default: 5)"
     )
     parser.add_argument(
         "--lumbar-offset",

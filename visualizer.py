@@ -722,26 +722,43 @@ class SKELForceVisualizer:
             # Compute distance to each joint
             distances = np.linalg.norm(joint_pos_array - vertex, axis=1)
 
-            # Collect all joints within their respective radii (flat circle condition)
+            # Collect all joints within their respective radii
+            # Apply soft edge falloff at boundary (80-100% of radius)
             contributing_joints = []
+            edge_falloff_start = 0.8  # Start fading at 80% of radius
+
             for j, (dist, torque, radius) in enumerate(zip(distances, joint_torque_list, joint_radii_array)):
                 if dist < radius and torque is not None:  # Only process if data exists
                     hotspot_color = torque_to_hotspot_color(torque, self.torque_percentiles)
                     if hotspot_color is not None:
+                        # Compute edge falloff: 1.0 at center, smoothly fades to 0 at edge
+                        dist_ratio = dist / radius
+                        if dist_ratio < edge_falloff_start:
+                            edge_alpha = 1.0  # Full intensity inside 80%
+                        else:
+                            # Smooth falloff from 80% to 100% of radius
+                            edge_alpha = 1.0 - (dist_ratio - edge_falloff_start) / (1.0 - edge_falloff_start)
+                            edge_alpha = edge_alpha ** 2  # Quadratic for smoother transition
+
                         # Use max(torque, 0.1) for weight so zero-torque joints still contribute
-                        weight = max(torque, 0.1)
-                        contributing_joints.append((hotspot_color, weight))
+                        weight = max(torque, 0.1) * edge_alpha
+                        contributing_joints.append((hotspot_color, weight, edge_alpha))
 
             if len(contributing_joints) == 0:
                 # No joints affect this vertex - use background
                 colors.append(tuple(bg_color))
             else:
-                # Torque-weighted average of all contributing joint colors
-                total_weight = sum(torque for _, torque in contributing_joints)
+                # Torque-weighted average of all contributing joint colors, with edge blending
+                total_weight = sum(w for _, w, _ in contributing_joints)
+                max_alpha = max(a for _, _, a in contributing_joints)
+
                 weighted_color = np.zeros(3)
-                for color, torque in contributing_joints:
-                    weighted_color += color * (torque / total_weight)
-                colors.append(tuple(np.clip(weighted_color, 0, 1)))
+                for color, weight, _ in contributing_joints:
+                    weighted_color += color * (weight / total_weight)
+
+                # Blend with background at edges
+                final_color = weighted_color * max_alpha + bg_color * (1.0 - max_alpha)
+                colors.append(tuple(np.clip(final_color, 0, 1)))
 
         return colors
 
