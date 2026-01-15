@@ -111,6 +111,7 @@ class SKELForceVisualizer:
         self.max_torque = max_torque
         self.torque_min = 0.0  # Will be updated by _scan_torque_range
         self.torque_max = max_torque  # Will be updated by _scan_torque_range
+        self.torque_percentiles = None  # Will be updated by _scan_torque_range
         self.line_scale = line_scale
         self.line_radius = line_radius
         self.sphere_radius = sphere_radius
@@ -298,11 +299,20 @@ class SKELForceVisualizer:
         if len(all_torques) > 0:
             self.torque_min = np.min(all_torques)
             self.torque_max = np.max(all_torques)
+            # Store sorted torques for percentile-based color mapping
+            self.torque_percentiles = np.sort(all_torques)
             if verbose:
                 print(f"Global torque range: {self.torque_min:.1f} - {self.torque_max:.1f} Nm")
+                # Show percentile distribution for color mapping reference
+                p25 = np.percentile(all_torques, 25)
+                p50 = np.percentile(all_torques, 50)
+                p75 = np.percentile(all_torques, 75)
+                p90 = np.percentile(all_torques, 90)
+                print(f"  Percentiles: 25%={p25:.1f}, 50%={p50:.1f}, 75%={p75:.1f}, 90%={p90:.1f} Nm")
         else:
             self.torque_min = 0.0
             self.torque_max = 300.0  # Default fallback
+            self.torque_percentiles = None
             if verbose:
                 print("No torque data found, using default range 0-300 Nm")
 
@@ -627,59 +637,111 @@ class SKELForceVisualizer:
         """
         Compute vertex colors with hotspot visualization at joint locations.
 
-        Background is bone color, joints glow red/orange/yellow based on torque.
-        Uses Gaussian falloff for smooth blending.
+        Background is bone color, joints show flat circles with torque-weighted colors.
+        When multiple joint circles overlap, colors are blended by torque-weighted average.
         """
         joint_names = list(joint_positions.keys())
         if len(joint_names) == 0:
             return [(0.85, 0.82, 0.75)] * len(vertices)  # Bone color
 
         joint_pos_array = np.array([joint_positions[name] for name in joint_names])
-        joint_torque_array = np.array([joint_torques.get(name, 0) for name in joint_names])
+        # Use list to preserve None values (None = no data, 0 = data exists but zero)
+        joint_torque_list = [joint_torques.get(name, None) for name in joint_names]
 
         # Background color (slightly darker bone for better contrast)
         bg_color = np.array([0.75, 0.72, 0.65])
 
-        # Hotspot colors (yellow -> red, low to high torque)
-        def torque_to_hotspot_color(torque, max_torque=300.0):
+        # Hotspot colors (dark red -> bright yellow, with high contrast)
+        def torque_to_hotspot_color(torque, torque_percentiles):
+            # torque=None: no data → return None (use background color)
+            if torque is None:
+                return None
+
+            # torque=0 or near-zero: black
             if torque < 1.0:
-                return None  # No hotspot
-            t = np.log10(torque + 1) / np.log10(max_torque + 1)
+                return np.array([0.0, 0.0, 0.0])  # Black for zero/near-zero torque
+
+            # Percentile-based normalization: maps torque to its percentile rank
+            # This spreads colors evenly across data density (more variation where data is dense)
+            if torque_percentiles is not None and len(torque_percentiles) > 0:
+                # Find percentile rank using binary search
+                idx = np.searchsorted(torque_percentiles, torque)
+                t = idx / len(torque_percentiles)
+            else:
+                t = 0.5
             t = np.clip(t, 0, 1)
-            # Red to Yellow gradient (low torque = red, high torque = bright yellow)
+
+            # High-contrast gradient with more color stops for dynamic variation
+            # Dark red -> Red -> Orange -> Yellow-Orange -> Bright Yellow
             colors = [
-                np.array([0.95, 0.0, 0.0]),   # 0.0 - vivid red
-                np.array([1.0, 0.3, 0.0]),    # 0.33 - red-orange
-                np.array([1.0, 0.6, 0.0]),    # 0.66 - orange
-                np.array([1.0, 0.95, 0.3]),   # 1.0 - bright yellow
+                np.array([0.5, 0.0, 0.0]),    # 0.00 - dark red (low percentile)
+                np.array([0.85, 0.0, 0.0]),   # 0.20 - medium red
+                np.array([1.0, 0.2, 0.0]),    # 0.40 - red-orange
+                np.array([1.0, 0.5, 0.0]),    # 0.60 - orange
+                np.array([1.0, 0.75, 0.1]),   # 0.80 - yellow-orange
+                np.array([1.0, 1.0, 0.4]),    # 1.00 - bright yellow (high percentile)
             ]
-            idx = t * 3
+            n_segments = len(colors) - 1
+            idx = t * n_segments
             i = int(idx)
-            if i >= 3:
-                return colors[3]
+            if i >= n_segments:
+                return colors[n_segments]
             frac = idx - i
             return colors[i] * (1 - frac) + colors[i + 1] * frac
 
-        # Hotspot radius (how far the glow extends)
-        hotspot_radius = 0.15  # 15cm radius
+        # Joint-specific hotspot radii (to avoid bleeding into nearby bones)
+        joint_radii = {
+            # Upper body - smaller radii to avoid rib cage bleeding
+            'left_shoulder': 0.08,
+            'right_shoulder': 0.08,
+            'left_elbow': 0.08,
+            'right_elbow': 0.08,
+            'left_wrist': 0.06,
+            'right_wrist': 0.06,
+            # Lower body - larger radii
+            'left_hip': 0.12,
+            'right_hip': 0.12,
+            'left_knee': 0.12,
+            'right_knee': 0.12,
+            'left_ankle': 0.10,
+            'right_ankle': 0.10,
+            # Spine - medium radii
+            'lumbar': 0.10,
+            'thorax': 0.10,
+            'head': 0.08,
+        }
+        default_radius = 0.10  # 10cm default for unlisted joints
+
+        # Build radius array matching joint order
+        joint_radii_array = np.array([
+            joint_radii.get(name, default_radius) for name in joint_names
+        ])
 
         colors = []
         for vertex in vertices:
             # Compute distance to each joint
             distances = np.linalg.norm(joint_pos_array - vertex, axis=1)
 
-            # Find if any joint is close enough for hotspot effect
-            final_color = bg_color.copy()
-            for j, (dist, torque) in enumerate(zip(distances, joint_torque_array)):
-                if dist < hotspot_radius and torque > 1.0:
-                    hotspot_color = torque_to_hotspot_color(torque, self.max_torque)
+            # Collect all joints within their respective radii (flat circle condition)
+            contributing_joints = []
+            for j, (dist, torque, radius) in enumerate(zip(distances, joint_torque_list, joint_radii_array)):
+                if dist < radius and torque is not None:  # Only process if data exists
+                    hotspot_color = torque_to_hotspot_color(torque, self.torque_percentiles)
                     if hotspot_color is not None:
-                        # Gaussian falloff from joint center
-                        intensity = np.exp(-(dist / (hotspot_radius / 2.5)) ** 2)
-                        # Blend hotspot color with current color
-                        final_color = final_color * (1 - intensity) + hotspot_color * intensity
+                        # Use max(torque, 0.1) for weight so zero-torque joints still contribute
+                        weight = max(torque, 0.1)
+                        contributing_joints.append((hotspot_color, weight))
 
-            colors.append(tuple(np.clip(final_color, 0, 1)))
+            if len(contributing_joints) == 0:
+                # No joints affect this vertex - use background
+                colors.append(tuple(bg_color))
+            else:
+                # Torque-weighted average of all contributing joint colors
+                total_weight = sum(torque for _, torque in contributing_joints)
+                weighted_color = np.zeros(3)
+                for color, torque in contributing_joints:
+                    weighted_color += color * (torque / total_weight)
+                colors.append(tuple(np.clip(weighted_color, 0, 1)))
 
         return colors
 
