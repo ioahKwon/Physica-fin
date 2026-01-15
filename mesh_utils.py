@@ -137,6 +137,127 @@ def create_sphere_mesh(
     return vertices, faces
 
 
+def create_cone_mesh(
+    base_center: np.ndarray,
+    tip: np.ndarray,
+    radius: float = 0.015,
+    segments: int = 8
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Create a cone mesh (arrowhead) pointing from base to tip.
+
+    Args:
+        base_center: Center of the cone base (3D)
+        tip: Tip point of the cone (3D)
+        radius: Radius of the cone base
+        segments: Number of segments around the cone
+
+    Returns:
+        Tuple of (vertices, faces) as numpy arrays
+    """
+    base_center = np.array(base_center, dtype=float)
+    tip = np.array(tip, dtype=float)
+
+    direction = tip - base_center
+    length = np.linalg.norm(direction)
+
+    if length < 1e-6:
+        return np.array([]), np.array([])
+
+    direction = direction / length
+
+    # Find perpendicular vectors
+    if abs(direction[1]) < 0.9:
+        perp1 = np.cross(direction, np.array([0.0, 1.0, 0.0]))
+    else:
+        perp1 = np.cross(direction, np.array([1.0, 0.0, 0.0]))
+    perp1 = perp1 / np.linalg.norm(perp1)
+    perp2 = np.cross(direction, perp1)
+
+    vertices = []
+
+    # Base circle vertices
+    for i in range(segments):
+        angle = 2 * np.pi * i / segments
+        offset = radius * (np.cos(angle) * perp1 + np.sin(angle) * perp2)
+        vertices.append(base_center + offset)
+
+    # Tip vertex
+    vertices.append(tip)
+    # Base center vertex (for bottom cap)
+    vertices.append(base_center)
+
+    vertices = np.array(vertices)
+
+    faces = []
+
+    # Side faces (triangles from base to tip)
+    tip_idx = segments
+    for i in range(segments):
+        i_next = (i + 1) % segments
+        faces.append([i, i_next, tip_idx])
+
+    # Bottom cap
+    base_center_idx = segments + 1
+    for i in range(segments):
+        i_next = (i + 1) % segments
+        faces.append([base_center_idx, i_next, i])
+
+    faces = np.array(faces)
+
+    return vertices, faces
+
+
+def create_arrow_mesh(
+    start: np.ndarray,
+    end: np.ndarray,
+    shaft_radius: float = 0.004,
+    head_radius: float = 0.012,
+    head_length_ratio: float = 0.25,
+    segments: int = 8
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Create a complete arrow mesh with shaft (cylinder) and head (cone).
+
+    Args:
+        start: Start point of the arrow (3D)
+        end: End point (tip) of the arrow (3D)
+        shaft_radius: Radius of the arrow shaft
+        head_radius: Radius of the arrowhead base
+        head_length_ratio: Ratio of head length to total arrow length
+        segments: Number of segments around the arrow
+
+    Returns:
+        Tuple of (shaft_verts, shaft_faces, head_verts, head_faces)
+    """
+    start = np.array(start, dtype=float)
+    end = np.array(end, dtype=float)
+
+    direction = end - start
+    total_length = np.linalg.norm(direction)
+
+    if total_length < 1e-6:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    direction_normalized = direction / total_length
+
+    # Calculate shaft end and head start
+    head_length = total_length * head_length_ratio
+    shaft_end = end - direction_normalized * head_length
+
+    # Create shaft (cylinder)
+    shaft_verts, shaft_faces = create_line_mesh(
+        start, shaft_end, radius=shaft_radius, segments=segments
+    )
+
+    # Create head (cone)
+    head_verts, head_faces = create_cone_mesh(
+        shaft_end, end, radius=head_radius, segments=segments
+    )
+
+    return shaft_verts, shaft_faces, head_verts, head_faces
+
+
 def read_obj_mesh(filepath: str) -> Tuple[np.ndarray, np.ndarray]:
     """
     Read OBJ file and return vertices and faces.

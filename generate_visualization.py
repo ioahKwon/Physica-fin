@@ -158,6 +158,7 @@ def generate_corrected_meshes(
         print(f"\nGenerating {T} frames...")
 
     frame_dirs = []
+    all_joints_ori = []  # Store world rotation matrices for each frame
 
     for i in range(T):
         if verbose and ((i + 1) % 20 == 0 or i == 0):
@@ -185,19 +186,34 @@ def generate_corrected_meshes(
             skin_path = os.path.join(frame_dir, "body.obj")
             _write_obj(skin_path, skin_verts, skin_faces)
 
-    # Save corrected parameters
+            # Extract world rotation matrices for torque transformation
+            # joints_ori: [1, 24, 3, 3] -> [24, 3, 3]
+            joints_ori = output.joints_ori[0].cpu().numpy()
+            all_joints_ori.append(joints_ori)
+
+    # Save corrected parameters and world rotation matrices
     params_out = os.path.join(output_dir, "skel_params_fixed.npz")
-    np.savez(params_out, poses=fixed_poses, betas=betas, trans=trans)
+    joints_ori_array = np.stack(all_joints_ori, axis=0)  # [T, 24, 3, 3]
+    np.savez(params_out,
+             poses=fixed_poses,
+             betas=betas,
+             trans=trans,
+             joints_ori=joints_ori_array)  # Add world rotations
 
     if verbose:
         print(f"\nSaved corrected params: {params_out}")
         print(f"Meshes saved to: {mesh_dir}")
+
+    # Also store frame_indices for mapping
+    frame_idx_map = frame_indices if frame_indices else list(range(T))
 
     return {
         'mesh_dir': mesh_dir,
         'frame_dirs': frame_dirs,
         'params_path': params_out,
         'num_frames': T,
+        'joints_ori': joints_ori_array,  # [T, 24, 3, 3]
+        'frame_indices': frame_idx_map,
     }
 
 
@@ -221,6 +237,7 @@ def run_force_visualization(
     smooth_sigma: float = 0.02,
     distance_falloff: float = 0.1,
     colormap_name: str = "plasma",
+    joints_ori_data: dict = None,  # NEW: world rotation data from generate_corrected_meshes
 ):
     """
     Run force visualization on corrected meshes.
@@ -236,6 +253,7 @@ def run_force_visualization(
         smooth_sigma: Sigma for Gaussian smoothing (meters)
         distance_falloff: Falloff for distance-based gradient (meters)
         colormap_name: 'plasma' or 'green'
+        joints_ori_data: Dict with 'joints_ori' (T, 24, 3, 3) and 'frame_indices' for local→global torque transform
     """
     # Input for force data (from skel_force_vis output, has frame_XXXX folders with force_data.json)
     input_base = os.path.join(SKEL_FORCE_VIS_OUTPUT, subject_name)
@@ -257,11 +275,13 @@ def run_force_visualization(
         skel_model_path=SKEL_MODEL_PATH,
         gender=gender,
         use_lbs_coloring=True,
-        unit_arrow_length=0.05,
+        unit_arrow_length=0.12,  # 12cm arrows - longer for better visibility
+        line_radius=0.005,  # Slightly thicker arrows
         mesh_override_dir=mesh_dir,  # Use corrected meshes
         coloring_mode=coloring_mode,
         smooth_sigma=smooth_sigma,
         distance_falloff=distance_falloff,
+        joints_ori_data=joints_ori_data,  # Pass world rotations for torque transform
     )
 
     vis.process_all_frames(verbose=verbose)
@@ -391,7 +411,12 @@ def main():
             verbose=verbose,
         )
 
-        # Step 2: Run force visualization
+        # Step 2: Run force visualization with world rotation data
+        joints_ori_data = {
+            'joints_ori': result['joints_ori'],  # [T, 24, 3, 3]
+            'frame_indices': result['frame_indices'],  # frame index mapping
+        }
+
         run_force_visualization(
             subject_name=subject,
             mesh_dir=result['mesh_dir'],
@@ -403,6 +428,7 @@ def main():
             smooth_sigma=args.smooth_sigma,
             distance_falloff=args.distance_falloff,
             colormap_name=args.colormap,
+            joints_ori_data=joints_ori_data,  # Pass for local→global torque transform
         )
 
         if verbose:

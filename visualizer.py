@@ -16,6 +16,7 @@ GRF_HEAD_COLOR = (1.0, 0.2, 0.2)   # Red endpoint
 from .mesh_utils import (
     create_line_mesh,
     create_sphere_mesh,
+    create_arrow_mesh,
     read_obj_mesh,
     write_obj_with_color,
 )
@@ -27,6 +28,7 @@ from .lbs_utils import (
     get_axis_index,
     SKEL_JOINT_NAMES,
     ADDB_TO_SKEL_JOINT_MAP,
+    ADDB_TO_SKEL_ROTATION_MAP,
     ADDB_PARENT_FALLBACK,
     JOINT_ROTATION_AXES,
 )
@@ -73,6 +75,7 @@ class SKELForceVisualizer:
         coloring_mode: str = 'lbs_blend',
         smooth_sigma: float = 0.02,
         distance_falloff: float = 0.1,
+        joints_ori_data: Optional[Dict] = None,
     ):
         """
         Initialize the visualizer.
@@ -103,6 +106,7 @@ class SKELForceVisualizer:
                 - 'distance': Distance-based gradient from joint positions
             smooth_sigma: Sigma for Gaussian smoothing (meters), used when coloring_mode='gaussian'
             distance_falloff: Falloff distance for distance-based gradient (meters), used when coloring_mode='distance'
+            joints_ori_data: Dict with 'joints_ori' (T, 24, 3, 3) and 'frame_indices' for local→global torque transform
         """
         self.input_base = input_base
         self.mesh_override_dir = mesh_override_dir
@@ -129,6 +133,14 @@ class SKELForceVisualizer:
         self.coloring_mode = coloring_mode
         self.smooth_sigma = smooth_sigma
         self.distance_falloff = distance_falloff
+
+        # Store joints_ori data for local→global torque transformation
+        self.joints_ori_data = joints_ori_data
+        self._frame_to_ori_idx = {}  # Maps frame number to joints_ori index
+        if joints_ori_data is not None:
+            frame_indices = joints_ori_data.get('frame_indices', [])
+            for i, frame_idx in enumerate(frame_indices):
+                self._frame_to_ori_idx[frame_idx] = i
 
         # Load LBS weights for proper bone segmentation
         self.template_dominant_joints = None
@@ -201,9 +213,26 @@ class SKELForceVisualizer:
             skeleton_vertices, joint_positions, joint_torques, faces=skeleton_faces
         )
 
+        # Get world rotations for this frame (for local→global torque transformation)
+        joint_world_rotations = None
+        if self.joints_ori_data is not None:
+            # Extract frame number from frame_name (e.g., "frame_0001" -> 1)
+            try:
+                frame_num = int(frame_name.split('_')[-1])
+                ori_idx = self._frame_to_ori_idx.get(frame_num)
+                if ori_idx is not None:
+                    joints_ori = self.joints_ori_data['joints_ori']  # [T, 24, 3, 3]
+                    frame_ori = joints_ori[ori_idx]  # [24, 3, 3]
+                    # Build dict: AddB joint name -> world rotation matrix
+                    joint_world_rotations = {}
+                    for addb_joint_name, skel_joint_idx in ADDB_TO_SKEL_ROTATION_MAP.items():
+                        joint_world_rotations[addb_joint_name] = frame_ori[skel_joint_idx]
+            except (ValueError, KeyError, IndexError):
+                pass  # Fallback: no transformation
+
         # Create 3-axis lines with endpoint spheres
         lines_data = self._create_axis_lines(
-            joint_positions, joint_tau_vectors
+            joint_positions, joint_tau_vectors, joint_world_rotations
         )
 
         # Create GRF arrows if enabled
@@ -291,7 +320,7 @@ class SKELForceVisualizer:
                     # Extract magnitudes from joint_torques array
                     for joint_data in force_data.get("joint_torques", []):
                         magnitude = joint_data.get("magnitude", 0)
-                        if magnitude > 0.5:  # Skip negligible torques
+                        if magnitude > 0.05:  # Skip only near-zero torques (matches color threshold)
                             all_torques.append(magnitude)
                 except:
                     continue
@@ -299,8 +328,10 @@ class SKELForceVisualizer:
         if len(all_torques) > 0:
             self.torque_min = np.min(all_torques)
             self.torque_max = np.max(all_torques)
-            # Store sorted torques for percentile-based color mapping
-            self.torque_percentiles = np.sort(all_torques)
+            # Store LOG-TRANSFORMED sorted torques for percentile-based color mapping
+            # This ensures equal color spread across orders of magnitude (0.05-0.5, 0.5-5, 5-50, etc.)
+            log_torques = np.log10(np.array(all_torques))
+            self.torque_percentiles = np.sort(log_torques)
             if verbose:
                 print(f"Global torque range: {self.torque_min:.1f} - {self.torque_max:.1f} Nm")
                 # Show percentile distribution for color mapping reference
@@ -309,6 +340,7 @@ class SKELForceVisualizer:
                 p75 = np.percentile(all_torques, 75)
                 p90 = np.percentile(all_torques, 90)
                 print(f"  Percentiles: 25%={p25:.1f}, 50%={p50:.1f}, 75%={p75:.1f}, 90%={p90:.1f} Nm")
+                print(f"  (Color mapping uses log scale for dynamic variation)")
         else:
             self.torque_min = 0.0
             self.torque_max = 300.0  # Default fallback
@@ -657,29 +689,40 @@ class SKELForceVisualizer:
             if torque is None:
                 return None
 
-            # torque=0 or near-zero: black
-            if torque < 1.0:
+            # Use ABSOLUTE VALUE - negative torque has same magnitude as positive
+            torque_magnitude = abs(torque)
+
+            # torque magnitude ≈ 0: black
+            MIN_TORQUE = 0.05  # Nm - threshold for "zero" torque
+            if torque_magnitude < MIN_TORQUE:
                 return np.array([0.0, 0.0, 0.0])  # Black for zero/near-zero torque
 
-            # Percentile-based normalization: maps torque to its percentile rank
-            # This spreads colors evenly across data density (more variation where data is dense)
+            # LOG-PERCENTILE hybrid: percentile on log-transformed values
+            # This gives equal color spread for 0.05-0.5, 0.5-5, 5-50, 50-500 etc.
+            log_torque = np.log10(torque_magnitude)
+
             if torque_percentiles is not None and len(torque_percentiles) > 0:
-                # Find percentile rank using binary search
-                idx = np.searchsorted(torque_percentiles, torque)
+                # torque_percentiles should be log-transformed values
+                # Find percentile rank using binary search on log scale
+                idx = np.searchsorted(torque_percentiles, log_torque)
                 t = idx / len(torque_percentiles)
             else:
-                t = 0.5
+                # Fallback: fixed log scale 0.05 ~ 300 Nm
+                log_min = np.log10(MIN_TORQUE)  # -1.3
+                log_max = np.log10(300.0)       # 2.48
+                t = (log_torque - log_min) / (log_max - log_min)
+
             t = np.clip(t, 0, 1)
 
             # High-contrast gradient with more color stops for dynamic variation
             # Dark red -> Red -> Orange -> Yellow-Orange -> Bright Yellow
             colors = [
-                np.array([0.5, 0.0, 0.0]),    # 0.00 - dark red (low percentile)
-                np.array([0.85, 0.0, 0.0]),   # 0.20 - medium red
-                np.array([1.0, 0.2, 0.0]),    # 0.40 - red-orange
-                np.array([1.0, 0.5, 0.0]),    # 0.60 - orange
-                np.array([1.0, 0.75, 0.1]),   # 0.80 - yellow-orange
-                np.array([1.0, 1.0, 0.4]),    # 1.00 - bright yellow (high percentile)
+                np.array([0.3, 0.0, 0.0]),    # 0.00 - very dark red (lowest)
+                np.array([0.6, 0.0, 0.0]),    # 0.20 - dark red
+                np.array([0.9, 0.1, 0.0]),    # 0.40 - red
+                np.array([1.0, 0.4, 0.0]),    # 0.60 - red-orange
+                np.array([1.0, 0.7, 0.1]),    # 0.80 - orange
+                np.array([1.0, 1.0, 0.4]),    # 1.00 - bright yellow (highest)
             ]
             n_segments = len(colors) - 1
             idx = t * n_segments
@@ -765,29 +808,44 @@ class SKELForceVisualizer:
     def _create_axis_lines(
         self,
         joint_positions: Dict[str, np.ndarray],
-        joint_tau_vectors: Dict[str, np.ndarray]
+        joint_tau_vectors: Dict[str, np.ndarray],
+        joint_world_rotations: Optional[Dict[str, np.ndarray]] = None
     ) -> List[tuple]:
         """
-        Create 3-axis lines with endpoint spheres for each joint.
+        Create 3-axis arrow visualization for each joint (like hand joint visualization).
 
-        For 1-DOF joints (knee, ankle, elbow), uses the correct rotation axis
-        from JOINT_ROTATION_AXES instead of defaulting to Y-axis.
+        Features:
+        - Shows ALL 3 axes (X, Y, Z) at each joint position
+        - Each axis is a unit vector arrow in global coordinates
+        - X = Red, Y = Blue, Z = Yellow
+        - Arrow direction shows the transformed local axis in world frame
 
-        Arrow length is fixed (unit vector) when unit_arrow_length > 0,
-        otherwise scales with magnitude.
+        Args:
+            joint_positions: Dict mapping joint name to 3D position
+            joint_tau_vectors: Dict mapping joint name to torque vector (local coordinates)
+            joint_world_rotations: Dict mapping joint name to 3x3 world rotation matrix
+                                   If provided, transforms local axes to global coordinates
         """
         lines_data = []
 
-        axes_colors = [
-            self.axis_colors['x'],
-            self.axis_colors['y'],
-            self.axis_colors['z'],
+        # Arrow parameters
+        arrow_length = self.unit_arrow_length if self.unit_arrow_length > 0 else 0.08
+        shaft_radius = self.line_radius * 1.0
+        head_radius = shaft_radius * 2.5
+        head_length_ratio = 0.25
+
+        # Local axis definitions
+        local_axes = [
+            np.array([1.0, 0.0, 0.0]),  # X axis (Red)
+            np.array([0.0, 1.0, 0.0]),  # Y axis (Blue)
+            np.array([0.0, 0.0, 1.0]),  # Z axis (Yellow)
         ]
 
-        axes_directions = [
-            np.array([1.0, 0.0, 0.0]),
-            np.array([0.0, 1.0, 0.0]),
-            np.array([0.0, 0.0, 1.0]),
+        # Colors for each axis
+        axes_colors = [
+            (0.9, 0.2, 0.2),   # X = Red
+            (0.2, 0.4, 0.9),   # Y = Blue
+            (0.9, 0.9, 0.2),   # Z = Yellow
         ]
 
         for joint_name, pos in joint_positions.items():
@@ -796,96 +854,76 @@ class SKELForceVisualizer:
             if len(tau_vec) < 1:
                 continue
 
-            # Handle 1-DOF joints with correct rotation axis
+            # Get world rotation for this joint (if available)
+            world_rot = None
+            if joint_world_rotations is not None:
+                world_rot = joint_world_rotations.get(joint_name)
+
+            # Determine number of DOFs and build tau_3d
             if len(tau_vec) == 1:
-                rotation_axis = get_rotation_axis_for_joint(joint_name)
-                if rotation_axis is not None:
-                    # Use correct rotation axis from OpenSim model definition
-                    axis_idx = get_axis_index(rotation_axis)
-                    magnitude = abs(tau_vec[0])
-
-                    if magnitude < self.torque_threshold:
-                        continue
-
-                    # Determine direction based on torque sign
-                    direction = rotation_axis if tau_vec[0] > 0 else -rotation_axis
-
-                    # Use unit arrow length or scale with magnitude
-                    if self.unit_arrow_length > 0:
-                        line_length = self.unit_arrow_length
-                    else:
-                        line_length = magnitude * self.line_scale
-
-                    end_pos = pos + direction * line_length
-
-                    # Create line cylinder
-                    line_verts, line_faces = create_line_mesh(
-                        start=pos,
-                        end=end_pos,
-                        radius=self.line_radius,
-                        segments=6
-                    )
-
-                    if len(line_verts) > 0:
-                        lines_data.append((line_verts, line_faces, axes_colors[axis_idx]))
-
-                    # Create endpoint sphere
-                    sphere_verts, sphere_faces = create_sphere_mesh(
-                        center=end_pos,
-                        radius=self.sphere_radius,
-                        segments=8,
-                        rings=6
-                    )
-
-                    if len(sphere_verts) > 0:
-                        lines_data.append((sphere_verts, sphere_faces, axes_colors[axis_idx]))
-
-                    continue  # Done with this joint
-
-                # Fallback: unknown 1-DOF joint, default to X-axis
-                tau_3d = np.array([tau_vec[0], 0, 0])
+                # 1-DOF joint: place torque on the correct axis
+                local_axis = get_rotation_axis_for_joint(joint_name)
+                if local_axis is not None:
+                    axis_idx = get_axis_index(local_axis)
+                    tau_3d = np.zeros(3)
+                    tau_3d[axis_idx] = tau_vec[0]
+                    active_axes = [axis_idx]  # Only this axis is active
+                else:
+                    tau_3d = np.array([tau_vec[0], 0, 0])
+                    active_axes = [0]
             elif len(tau_vec) == 2:
                 tau_3d = np.array([tau_vec[0], tau_vec[1], 0])
+                active_axes = [0, 1]  # X and Y are active
+            elif len(tau_vec) >= 6:
+                # 6-DOF (ground_pelvis): use rotation components (indices 3, 4, 5)
+                tau_3d = np.array([tau_vec[3], tau_vec[4], tau_vec[5]])
+                active_axes = [0, 1, 2]  # All 3 rotation axes
             else:
                 tau_3d = tau_vec[:3]
+                active_axes = [0, 1, 2]  # All 3 axes
 
-            # Handle multi-DOF joints (3-DOF: hip, shoulder, back, etc.)
-            for axis_idx in range(3):
-                component_magnitude = abs(tau_3d[axis_idx])
+            # Show ALL active axes for this joint
+            for axis_idx in active_axes:
+                local_axis = local_axes[axis_idx]
+                torque_component = tau_3d[axis_idx] if axis_idx < len(tau_3d) else 0.0
 
-                if component_magnitude < self.torque_threshold:
-                    continue
-
-                # Use unit arrow length or scale with magnitude
-                if self.unit_arrow_length > 0:
-                    line_length = self.unit_arrow_length
+                # Transform local axis to global coordinates
+                if world_rot is not None:
+                    global_axis = world_rot @ local_axis
+                    global_axis = global_axis / (np.linalg.norm(global_axis) + 1e-8)
                 else:
-                    line_length = component_magnitude * self.line_scale
+                    global_axis = local_axis
 
-                direction = axes_directions[axis_idx] if tau_3d[axis_idx] > 0 else -axes_directions[axis_idx]
-                end_pos = pos + direction * line_length
+                # Direction based on torque sign (positive = axis direction)
+                # Color is ALWAYS the axis color - intensity based on |torque|
+                # Only truly zero torque gets gray
+                torque_magnitude = abs(torque_component)
 
-                # Create line cylinder
-                line_verts, line_faces = create_line_mesh(
-                    start=pos,
-                    end=end_pos,
-                    radius=self.line_radius,
-                    segments=6
+                if torque_magnitude < 0.01:
+                    # Truly zero torque - show gray
+                    direction = global_axis  # Default to positive direction
+                    color = (0.5, 0.5, 0.5)  # Gray for zero torque
+                else:
+                    # Non-zero torque (positive OR negative)
+                    # Direction flips based on sign, but COLOR stays the same
+                    direction = global_axis if torque_component > 0 else -global_axis
+                    color = axes_colors[axis_idx]  # Same color for + and - torque
+
+                end_pos = pos + direction * arrow_length
+
+                # Create arrow
+                shaft_v, shaft_f, head_v, head_f = create_arrow_mesh(
+                    start=pos, end=end_pos,
+                    shaft_radius=shaft_radius,
+                    head_radius=head_radius,
+                    head_length_ratio=head_length_ratio,
+                    segments=8
                 )
 
-                if len(line_verts) > 0:
-                    lines_data.append((line_verts, line_faces, axes_colors[axis_idx]))
-
-                # Create endpoint sphere
-                sphere_verts, sphere_faces = create_sphere_mesh(
-                    center=end_pos,
-                    radius=self.sphere_radius,
-                    segments=8,
-                    rings=6
-                )
-
-                if len(sphere_verts) > 0:
-                    lines_data.append((sphere_verts, sphere_faces, axes_colors[axis_idx]))
+                if len(shaft_v) > 0:
+                    lines_data.append((shaft_v, shaft_f, color))
+                if len(head_v) > 0:
+                    lines_data.append((head_v, head_f, color))
 
         return lines_data
 

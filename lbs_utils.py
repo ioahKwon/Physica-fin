@@ -95,6 +95,40 @@ JOINT_ROTATION_AXES = {
     'elbow_l': np.array([1.0, 0.0, 0.0]),
 }
 
+# SKEL joint names (24 joints)
+SKEL_JOINT_NAMES = [
+    'pelvis', 'femur_r', 'tibia_r', 'talus_r', 'calcn_r', 'toes_r',
+    'femur_l', 'tibia_l', 'talus_l', 'calcn_l', 'toes_l',
+    'lumbar_body', 'thorax', 'head',
+    'scapula_r', 'humerus_r', 'ulna_r', 'radius_r', 'hand_r',
+    'scapula_l', 'humerus_l', 'ulna_l', 'radius_l', 'hand_l',
+]
+
+# AddBiomechanics joint name -> SKEL joint index for world rotation lookup
+# Used to transform local torques to global coordinates
+ADDB_TO_SKEL_ROTATION_MAP = {
+    'ground_pelvis': 0,    # pelvis
+    'hip_r': 1,            # femur_r
+    'walker_knee_r': 2,    # tibia_r
+    'ankle_r': 3,          # talus_r
+    'subtalar_r': 4,       # calcn_r
+    'mtp_r': 5,            # toes_r
+    'hip_l': 6,            # femur_l
+    'walker_knee_l': 7,    # tibia_l
+    'ankle_l': 8,          # talus_l
+    'subtalar_l': 9,       # calcn_l
+    'mtp_l': 10,           # toes_l
+    'back': 11,            # lumbar_body
+    'acromial_r': 15,      # humerus_r (shoulder)
+    'elbow_r': 16,         # ulna_r
+    'radioulnar_r': 17,    # radius_r
+    'radius_hand_r': 18,   # hand_r
+    'acromial_l': 20,      # humerus_l (shoulder)
+    'elbow_l': 21,         # ulna_l
+    'radioulnar_l': 22,    # radius_l
+    'radius_hand_l': 23,   # hand_l
+}
+
 
 def get_rotation_axis_for_joint(joint_name: str) -> Optional[np.ndarray]:
     """
