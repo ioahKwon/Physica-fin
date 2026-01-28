@@ -245,17 +245,21 @@ def convert_addb_to_skel_coords(
     AddB uses a different coordinate convention than SKEL.
     This function handles the transformation.
 
+    Coordinate conventions:
+        AddB: right = +X, left = -X, forward = -Z
+        SKEL: right = -X, left = +X, forward = +Z
+
+    Therefore, we need to flip BOTH X and Z axes.
+
     Args:
         addb_joints: AddB joint positions [T, J, 3] or [J, 3].
 
     Returns:
         Converted joint positions in SKEL coordinate system.
     """
-    # AddB: X=right, Y=up, Z=forward
-    # SKEL: X=right, Y=up, Z=backward (facing -Z)
-    # So we need to flip Z
     converted = addb_joints.copy()
-    converted[..., 2] = -converted[..., 2]
+    converted[..., 0] = -converted[..., 0]  # Flip X (right/left convention)
+    converted[..., 2] = -converted[..., 2]  # Flip Z (forward convention)
     return converted
 
 

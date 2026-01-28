@@ -138,6 +138,33 @@ class OptimizationConfig:
     # Virtual acromial vertex indices (computed at runtime)
     acromial_vertex_indices: Optional[Dict[str, List[int]]] = None
 
+    # ==========================================================================
+    # Phase 1 Improvements: Quick Wins
+    # ==========================================================================
+
+    # Cosine annealing learning rate schedule
+    use_cosine_lr: bool = True
+
+    # Huber loss (robust to outliers) instead of MSE
+    use_huber_loss: bool = True
+    huber_delta: float = 0.05  # 50mm in meters
+
+    # Early stopping
+    use_early_stopping: bool = True
+    early_stopping_patience: int = 50  # Stop if no improvement for N iterations
+
+    # ==========================================================================
+    # Phase 2 Improvements: Dynamic Weighting
+    # ==========================================================================
+
+    # Dynamic joint weighting based on per-joint errors
+    use_dynamic_weights: bool = False  # Disabled by default, enable for experiments
+    dynamic_weight_scale: float = 0.5  # How much to scale weights by error
+
+    # Soft pose constraints (penalty instead of hard clamp)
+    use_soft_constraints: bool = False  # Disabled by default
+    soft_constraint_weight: float = 0.1  # Weight for constraint penalty
+
     def get_device(self) -> torch.device:
         """Get torch device."""
         if self.device == 'cuda' and torch.cuda.is_available():

@@ -90,9 +90,13 @@ def convert_addb_to_skel(
     if num_joints != 20:
         raise ValueError(f"Expected 20 AddB joints, got {num_joints}")
 
-    # Note: AddB and SKEL use the same coordinate system (no conversion needed)
-    # This was verified by comparing with the working compare_smpl_skel.py code
-    addb_joints_converted = addb_joints
+    # IMPORTANT: AddB and SKEL have different coordinate conventions!
+    # AddB: right = +X, left = -X, forward = -Z
+    # SKEL: right = -X, left = +X, forward = +Z
+    # We flip X and Z coordinates to match SKEL convention during fitting
+    addb_joints_converted = addb_joints.copy()
+    addb_joints_converted[:, :, 0] = -addb_joints_converted[:, :, 0]  # Flip X
+    addb_joints_converted[:, :, 2] = -addb_joints_converted[:, :, 2]  # Flip Z
 
     # Initialize SKEL model
     if verbose:
@@ -159,6 +163,16 @@ def convert_addb_to_skel(
                 betas.unsqueeze(0).expand(T, -1), poses, trans
             )
             vertices = None
+
+    # Flip X and Z back to original AddB coordinate system
+    # (We flipped X and Z at input to match SKEL convention, now flip back for output)
+    joints[:, :, 0] = -joints[:, :, 0]
+    joints[:, :, 2] = -joints[:, :, 2]
+    trans[:, 0] = -trans[:, 0]
+    trans[:, 2] = -trans[:, 2]
+    if vertices is not None:
+        vertices[:, :, 0] = -vertices[:, :, 0]
+        vertices[:, :, 2] = -vertices[:, :, 2]
 
     # Build result
     result = ConversionResult(

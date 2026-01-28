@@ -8,9 +8,15 @@ Stage 2 of the 2-stage optimization pipeline:
 Implements IK-style gradient descent optimization following:
 - HSMR SKELify approach for 2D keypoint fitting
 - AddBiomechanics kinematics pass for marker fitting
+
+Improvements (Phase 1 - Quick Wins):
+- Cosine annealing learning rate schedule
+- Huber loss for robustness to outliers
+- Early stopping to prevent overfitting
 """
 
 from typing import Optional, Tuple, Dict, List
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -40,6 +46,7 @@ from .utils.geometry import (
     compute_bone_directions,
     cosine_similarity_loss,
 )
+from .pose_limits import get_pose_bounds_tensor, clamp_poses
 
 
 # =============================================================================
@@ -232,6 +239,92 @@ class PoseOptimizer:
         # Scapula handler
         self.scapula_handler = ScapulaHandler(skel_interface, config)
 
+        # Pose bounds for clamping (comprehensive limits from literature)
+        self.pose_lower, self.pose_upper = get_pose_bounds_tensor(self.device)
+
+    def _get_cosine_lr(self, base_lr: float, current_iter: int, total_iters: int) -> float:
+        """
+        Compute learning rate with cosine annealing schedule.
+
+        LR follows: lr = base_lr * (1 + cos(π * t / T)) / 2
+        This smoothly decays from base_lr to 0.
+
+        Args:
+            base_lr: Initial learning rate
+            current_iter: Current iteration (0-indexed)
+            total_iters: Total number of iterations
+
+        Returns:
+            Current learning rate
+        """
+        return base_lr * (1 + math.cos(math.pi * current_iter / total_iters)) / 2
+
+    def _update_optimizer_lr(self, optimizer: torch.optim.Optimizer, lr_multiplier: float):
+        """
+        Update learning rate for all parameter groups in optimizer.
+
+        Args:
+            optimizer: PyTorch optimizer
+            lr_multiplier: Multiplier to apply to base learning rates
+        """
+        for param_group in optimizer.param_groups:
+            if 'initial_lr' not in param_group:
+                param_group['initial_lr'] = param_group['lr']
+            param_group['lr'] = param_group['initial_lr'] * lr_multiplier
+
+    def _compute_soft_constraint_penalty(self, poses: torch.Tensor) -> torch.Tensor:
+        """
+        Compute soft penalty for pose values outside bounds.
+
+        Instead of hard clamping, adds a smooth penalty:
+        penalty = sum(relu(pose - upper)^2 + relu(lower - pose)^2)
+
+        This allows gradients to flow even when near bounds.
+
+        Args:
+            poses: Pose parameters [T, 46]
+
+        Returns:
+            Scalar penalty value
+        """
+        # Penalty for exceeding upper bounds
+        upper_violation = F.relu(poses - self.pose_upper)
+        # Penalty for going below lower bounds
+        lower_violation = F.relu(self.pose_lower - poses)
+
+        penalty = (upper_violation ** 2).sum() + (lower_violation ** 2).sum()
+        return penalty
+
+    def _update_dynamic_weights(
+        self,
+        pred_joints: torch.Tensor,
+        target_joints: torch.Tensor,
+    ) -> None:
+        """
+        Update joint weights dynamically based on per-joint errors.
+
+        High-error joints get increased weight to encourage the optimizer
+        to focus on reducing their errors.
+
+        Args:
+            pred_joints: Predicted joint positions [T, num_joints, 3]
+            target_joints: Target joint positions [T, num_joints, 3]
+        """
+        with torch.no_grad():
+            # Compute per-joint errors
+            per_joint_error = torch.norm(pred_joints - target_joints, dim=-1).mean(dim=0)  # [num_joints]
+
+            # Compute scale factors (higher error → higher weight)
+            mean_error = per_joint_error.mean()
+            if mean_error > 1e-8:
+                scale = per_joint_error / mean_error  # Normalize by mean
+                # Apply scaling: weight *= (1 + scale_factor * (scale - 1))
+                # This increases weight for above-average errors, decreases for below-average
+                dynamic_weights = self.joint_weights * (1 + self.config.dynamic_weight_scale * (scale - 1))
+                # Normalize to sum to original sum (preserve overall weight magnitude)
+                dynamic_weights = dynamic_weights * (self.joint_weights.sum() / dynamic_weights.sum())
+                self.joint_weights = dynamic_weights
+
     def _build_joint_weights(self) -> torch.Tensor:
         """
         Build per-joint weight tensor based on SKEL_JOINT_WEIGHTS config.
@@ -264,22 +357,38 @@ class PoseOptimizer:
         """
         Compute weighted joint position loss.
 
+        Supports both MSE and Huber (smooth L1) loss based on config.
+        Huber loss is more robust to outliers (noisy joint detections).
+
         Args:
             pred_joints: Predicted joint positions [T, num_joints, 3]
             target_joints: Target joint positions [T, num_joints, 3]
 
         Returns:
-            Weighted MSE loss scalar
+            Weighted loss scalar
         """
-        # Squared difference: [T, num_joints, 3]
-        sq_diff = (pred_joints - target_joints) ** 2
-
         # Apply per-joint weights: [num_joints] -> [1, num_joints, 1]
         weights = self.joint_weights.view(1, -1, 1)
-        weighted_sq_diff = sq_diff * weights
 
-        # Mean over all dimensions
-        return weighted_sq_diff.mean()
+        if self.config.use_huber_loss:
+            # Huber loss (smooth L1) - robust to outliers
+            # F.smooth_l1_loss with beta parameter acts as Huber loss
+            # For |x| < beta: loss = 0.5 * x^2 / beta
+            # For |x| >= beta: loss = |x| - 0.5 * beta
+            diff = pred_joints - target_joints
+            # Per-element Huber loss
+            huber = F.smooth_l1_loss(
+                pred_joints, target_joints,
+                beta=self.config.huber_delta,
+                reduction='none'
+            )
+            weighted_loss = huber * weights
+            return weighted_loss.mean()
+        else:
+            # Standard MSE loss
+            sq_diff = (pred_joints - target_joints) ** 2
+            weighted_sq_diff = sq_diff * weights
+            return weighted_sq_diff.mean()
 
     def optimize_single_frame(
         self,
@@ -398,9 +507,9 @@ class PoseOptimizer:
             loss.backward()
             optimizer.step()
 
-            # Clamp scapula DOFs
+            # Clamp all pose DOFs to physiological limits
             with torch.no_grad():
-                poses.data = self.scapula_handler.clamp_scapula_dofs(poses.data)
+                poses.data = clamp_poses(poses.data, self.pose_lower, self.pose_upper)
 
             if loss.item() < best_loss:
                 best_loss = loss.item()
@@ -524,9 +633,21 @@ class PoseOptimizer:
         # =====================================================================
         if verbose:
             print(f"\n  === Stage 1: Pose Optimization (betas fixed) ===")
+            if self.config.use_cosine_lr:
+                print(f"    Using cosine annealing LR schedule")
+            if self.config.use_huber_loss:
+                print(f"    Using Huber loss (delta={self.config.huber_delta})")
+            if self.config.use_early_stopping:
+                print(f"    Early stopping patience: {self.config.early_stopping_patience}")
 
+        no_improve_count = 0
         pbar = tqdm(range(stage1_iters), disable=not verbose, desc="Stage1")
         for it in pbar:
+            # Cosine annealing learning rate
+            if self.config.use_cosine_lr:
+                lr_mult = (1 + math.cos(math.pi * it / stage1_iters)) / 2
+                self._update_optimizer_lr(optimizer_stage1, lr_mult)
+
             optimizer_stage1.zero_grad()
 
             # Forward through SKEL
@@ -541,22 +662,54 @@ class PoseOptimizer:
                 use_temporal, T, include_betas_reg=False
             )
 
+            # Add soft constraint penalty if enabled
+            if self.config.use_soft_constraints:
+                constraint_penalty = self._compute_soft_constraint_penalty(poses)
+                loss = loss + self.config.soft_constraint_weight * constraint_penalty
+
             loss.backward()
             optimizer_stage1.step()
 
-            # Clamp scapula DOFs
-            with torch.no_grad():
-                poses.data = self.scapula_handler.clamp_scapula_dofs(poses.data)
+            # Clamp all pose DOFs to physiological limits (unless using soft constraints only)
+            if not self.config.use_soft_constraints:
+                with torch.no_grad():
+                    poses.data = clamp_poses(poses.data, self.pose_lower, self.pose_upper)
 
+            # Track best result
             if loss.item() < best_loss:
                 best_loss = loss.item()
                 best_poses = poses.clone().detach()
                 best_trans = trans.clone().detach()
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+
+            # Early stopping
+            if self.config.use_early_stopping and no_improve_count >= self.config.early_stopping_patience:
+                if verbose:
+                    print(f"\n    Early stopping at iteration {it+1} (no improvement for {no_improve_count} iters)")
+                break
 
             if verbose:
                 with torch.no_grad():
                     mpjpe = self._compute_mpjpe(skel_joints, addb_joints)
-                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'mpjpe': f'{mpjpe:.1f}mm'})
+                current_lr = optimizer_stage1.param_groups[0]['lr']
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'mpjpe': f'{mpjpe:.1f}mm', 'lr': f'{current_lr:.4f}'})
+
+        # =====================================================================
+        # Between Stages: Update dynamic joint weights if enabled
+        # =====================================================================
+        if self.config.use_dynamic_weights:
+            with torch.no_grad():
+                # Compute current predictions with best poses
+                skel_verts, skel_joints, _ = self.skel.forward(
+                    betas.unsqueeze(0).expand(T, -1), best_poses, best_trans
+                )
+                pred_joints_mapped = skel_joints[:, self.skel_indices, :]
+                target_joints_mapped = addb_joints[:, self.addb_indices, :]
+                self._update_dynamic_weights(pred_joints_mapped, target_joints_mapped)
+                if verbose:
+                    print(f"\n  Dynamic weights updated based on per-joint errors")
 
         # =====================================================================
         # STAGE 2: All parameters optimization (betas + poses + trans)
@@ -576,8 +729,17 @@ class PoseOptimizer:
             {'params': [trans], 'lr': 0.005}
         ])
 
+        # Reset early stopping counter for Stage 2
+        no_improve_count = 0
+        stage2_best_loss = best_loss  # Track Stage 2 specific improvement
+
         pbar = tqdm(range(stage2_iters), disable=not verbose, desc="Stage2")
         for it in pbar:
+            # Cosine annealing learning rate
+            if self.config.use_cosine_lr:
+                lr_mult = (1 + math.cos(math.pi * it / stage2_iters)) / 2
+                self._update_optimizer_lr(optimizer_stage2, lr_mult)
+
             optimizer_stage2.zero_grad()
 
             # Forward through SKEL
@@ -592,23 +754,44 @@ class PoseOptimizer:
                 use_temporal, T, include_betas_reg=True, betas=betas
             )
 
+            # Add soft constraint penalty if enabled
+            if self.config.use_soft_constraints:
+                constraint_penalty = self._compute_soft_constraint_penalty(poses)
+                loss = loss + self.config.soft_constraint_weight * constraint_penalty
+
             loss.backward()
             optimizer_stage2.step()
 
-            # Clamp scapula DOFs
-            with torch.no_grad():
-                poses.data = self.scapula_handler.clamp_scapula_dofs(poses.data)
+            # Clamp all pose DOFs to physiological limits (unless using soft constraints only)
+            if not self.config.use_soft_constraints:
+                with torch.no_grad():
+                    poses.data = clamp_poses(poses.data, self.pose_lower, self.pose_upper)
 
+            # Track best result (overall best)
             if loss.item() < best_loss:
                 best_loss = loss.item()
                 best_poses = poses.clone().detach()
                 best_trans = trans.clone().detach()
                 best_betas = betas.clone().detach()
 
+            # Track Stage 2 specific improvement for early stopping
+            if loss.item() < stage2_best_loss:
+                stage2_best_loss = loss.item()
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+
+            # Early stopping
+            if self.config.use_early_stopping and no_improve_count >= self.config.early_stopping_patience:
+                if verbose:
+                    print(f"\n    Early stopping at iteration {it+1} (no improvement for {no_improve_count} iters)")
+                break
+
             if verbose:
                 with torch.no_grad():
                     mpjpe = self._compute_mpjpe(skel_joints, addb_joints)
-                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'mpjpe': f'{mpjpe:.1f}mm'})
+                current_lr = optimizer_stage2.param_groups[0]['lr']
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'mpjpe': f'{mpjpe:.1f}mm', 'lr': f'{current_lr:.4f}'})
 
         # Final statistics
         with torch.no_grad():
