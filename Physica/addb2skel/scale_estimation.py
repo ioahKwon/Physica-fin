@@ -22,6 +22,8 @@ from .joint_definitions import (
     SKEL_JOINT_TO_IDX,
     get_bone_indices,
 )
+import logging
+logger = logging.getLogger(__name__)
 from .utils.geometry import compute_bone_lengths
 
 
@@ -62,6 +64,8 @@ class ScaleEstimator:
         addb_joints: np.ndarray,
         initial_betas: Optional[torch.Tensor] = None,
         verbose: bool = False,
+        marker_handler=None,
+        target_mass_kg: Optional[float] = None,
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Estimate SKEL betas by matching reliable bone lengths.
@@ -70,6 +74,7 @@ class ScaleEstimator:
             addb_joints: AddB joint positions [T, 20, 3] in meters.
             initial_betas: Initial beta values [10]. Default: zeros.
             verbose: Print progress.
+            target_mass_kg: Optional target body mass in kg (SKEL Section 6.5).
 
         Returns:
             betas: Estimated shape parameters [10].
@@ -84,6 +89,20 @@ class ScaleEstimator:
         if verbose:
             print(f"Target bone lengths (mm): {target_lengths.cpu().numpy() * 1000}")
 
+        # Build per-bone weights from config
+        bone_weights = torch.ones(len(RELIABLE_BONE_PAIRS_ADDB), device=self.device)
+        if self.config.scale_bone_weights:
+            for i, (a1, a2) in enumerate(RELIABLE_BONE_PAIRS_ADDB):
+                key = f"{a1}→{a2}"
+                if key in self.config.scale_bone_weights:
+                    bone_weights[i] = self.config.scale_bone_weights[key]
+            if verbose:
+                weighted = [(f"{a1}→{a2}", bone_weights[i].item())
+                            for i, (a1, a2) in enumerate(RELIABLE_BONE_PAIRS_ADDB)
+                            if bone_weights[i].item() != 1.0]
+                if weighted:
+                    print(f"  Per-bone weights: {weighted}")
+
         # Initialize betas
         if initial_betas is None:
             betas = torch.zeros(SKEL_NUM_BETAS, device=self.device)
@@ -92,8 +111,17 @@ class ScaleEstimator:
 
         betas.requires_grad_(True)
 
-        # Optimizer
-        optimizer = torch.optim.Adam([betas], lr=self.config.scale_lr)
+        # Initialize dJ (joint offset corrections)
+        from .config import SKEL_NUM_JOINTS
+        use_dj = self.config.use_dj_optimization
+        dJ = torch.zeros(1, SKEL_NUM_JOINTS, 3, device=self.device, requires_grad=use_dj)
+
+        # Optimizer — include dJ if enabled (low LR: betas do main work, dJ is residual)
+        opt_params = [{'params': [betas], 'lr': self.config.scale_lr}]
+        if use_dj:
+            dj_lr = self.config.scale_lr * getattr(self.config, 'dj_lr_factor', 0.1)
+            opt_params.append({'params': [dJ], 'lr': dj_lr})
+        optimizer = torch.optim.Adam(opt_params)
 
         # T-pose for scale estimation
         poses = torch.zeros(1, SKEL_NUM_POSE_DOF, device=self.device)
@@ -101,27 +129,69 @@ class ScaleEstimator:
 
         best_loss = float('inf')
         best_betas = betas.clone()
+        best_dJ = dJ.clone().detach()
+
+        # Precompute mean marker targets for T-pose comparison (if available)
+        marker_mean_targets = None
+        marker_mean_mask = None
+        if marker_handler is not None and marker_handler.num_markers > 0:
+            # Average observed marker positions across all frames (for T-pose matching)
+            marker_mean_targets = marker_handler.marker_targets.mean(dim=0)  # [K, 3]
+            marker_mean_mask = marker_handler.marker_mask.any(dim=0)  # [K] at least 1 frame observed
+            if verbose:
+                n_valid = marker_mean_mask.sum().item()
+                print(f"  Marker-aware scale: {n_valid}/{marker_handler.num_markers} markers with observations")
+
+        # Need vertices when using marker handler
+        need_verts = (marker_handler is not None and marker_handler.num_markers > 0)
 
         for it in range(self.config.scale_iters):
             optimizer.zero_grad()
 
-            # Forward through SKEL
-            _, skel_joints, _ = self.skel.forward(
-                betas.unsqueeze(0), poses, trans
-            )
+            # Forward through SKEL (with dJ offset)
+            dJ_arg = dJ if use_dj else None
+            if need_verts:
+                verts, skel_joints, _ = self.skel.forward(
+                    betas.unsqueeze(0), poses, trans, dJ=dJ_arg
+                )
+            else:
+                _, skel_joints, _ = self.skel.forward(
+                    betas.unsqueeze(0), poses, trans, dJ=dJ_arg
+                )
 
             # Compute SKEL bone lengths
             skel_lengths = compute_bone_lengths(
                 skel_joints, self.skel_bone_indices
             )[0]  # [num_bones]
 
-            # Bone length loss
-            length_loss = F.mse_loss(skel_lengths, target_lengths)
+            # Bone length loss (weighted per-bone)
+            length_loss = (bone_weights * (skel_lengths - target_lengths) ** 2).mean()
+
+            # Marker loss in T-pose (joint + offset, rotation=identity in T-pose)
+            marker_loss = torch.tensor(0.0, device=self.device)
+            if (marker_handler is not None and marker_handler.num_markers > 0
+                    and marker_mean_targets is not None):
+                # Predict marker positions: joint_pos + local_offset
+                pred_marker = (skel_joints[0, marker_handler.skel_joint_indices, :]
+                               + marker_handler.local_offsets)  # [K, 3]
+                diff = pred_marker - marker_mean_targets  # [K, 3]
+                sq_error = (diff ** 2).sum(dim=-1)  # [K]
+                masked = sq_error[marker_mean_mask]
+                if masked.numel() > 0:
+                    marker_loss = masked.mean()
 
             # Beta regularization (prefer smaller betas)
             reg_loss = 0.001 * (betas ** 2).mean()
 
-            loss = length_loss + reg_loss
+            # dJ regularization (prevent large joint offsets)
+            dj_reg_loss = torch.tensor(0.0, device=self.device)
+            if use_dj:
+                dj_reg_loss = self.config.weight_dj_reg * (dJ ** 2).mean()
+
+            loss = (length_loss
+                    + self.config.weight_marker_scale * marker_loss
+                    + reg_loss
+                    + dj_reg_loss)
 
             loss.backward()
             optimizer.step()
@@ -129,17 +199,24 @@ class ScaleEstimator:
             if loss.item() < best_loss:
                 best_loss = loss.item()
                 best_betas = betas.clone().detach()
+                best_dJ = dJ.clone().detach()
 
             if verbose and (it + 1) % 50 == 0:
                 with torch.no_grad():
                     length_err = (skel_lengths - target_lengths).abs().mean() * 1000
+                marker_str = f", MarkerLoss={marker_loss.item():.6f}" if marker_loss.item() > 0 else ""
+                dj_str = ""
+                if use_dj:
+                    dj_mag = dJ.abs().mean().item() * 1000  # mm
+                    dj_str = f", dJ_mean={dj_mag:.2f}mm"
                 print(f"  Iter {it+1}/{self.config.scale_iters}: "
-                      f"Loss={loss.item():.6f}, LenErr={length_err:.2f}mm")
+                      f"Loss={loss.item():.6f}, LenErr={length_err:.2f}mm{marker_str}{dj_str}")
 
         # Final statistics
+        dJ_arg_final = best_dJ if use_dj else None
         with torch.no_grad():
-            _, skel_joints, _ = self.skel.forward(
-                best_betas.unsqueeze(0), poses, trans
+            verts_final, skel_joints, _ = self.skel.forward(
+                best_betas.unsqueeze(0), poses, trans, dJ=dJ_arg_final
             )
             skel_lengths = compute_bone_lengths(
                 skel_joints, self.skel_bone_indices
@@ -153,6 +230,13 @@ class ScaleEstimator:
             'target_lengths_mm': target_lengths.cpu().numpy() * 1000,
             'fitted_lengths_mm': skel_lengths.cpu().numpy() * 1000,
         }
+
+        # Add dJ statistics
+        if use_dj:
+            stats['dJ'] = best_dJ
+            dj_abs = best_dJ.abs()
+            stats['dJ_mean_mm'] = dj_abs.mean().item() * 1000
+            stats['dJ_max_mm'] = dj_abs.max().item() * 1000
 
         return best_betas, stats
 
@@ -206,6 +290,8 @@ def estimate_subject_scale(
     height_m: Optional[float] = None,
     shoulder_width_m: Optional[float] = None,
     verbose: bool = False,
+    marker_handler=None,
+    target_mass_kg: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Dict]:
     """
     Convenience function to estimate subject scale.
@@ -217,6 +303,8 @@ def estimate_subject_scale(
         height_m: Optional known height for initialization.
         shoulder_width_m: Optional known shoulder width for initialization.
         verbose: Print progress.
+        marker_handler: Optional MarkerHandler for marker-aware scale estimation.
+        target_mass_kg: Optional target body mass in kg (SKEL Section 6.5).
 
     Returns:
         betas: Estimated shape parameters [10].
@@ -233,9 +321,15 @@ def estimate_subject_scale(
         if verbose:
             print(f"Initial betas from height/width: {initial_betas[:3].cpu().numpy()}")
 
-    # Refine using bone lengths
+    # Refine using bone lengths (+ optional marker loss + optional mass constraint)
     betas, stats = estimator.estimate_from_bone_lengths(
-        addb_joints, initial_betas, verbose
+        addb_joints, initial_betas, verbose,
+        marker_handler=marker_handler,
+        target_mass_kg=target_mass_kg,
     )
+
+    # Extract dJ from stats (if optimized)
+    dJ = stats.pop('dJ', None)
+    stats['dJ'] = dJ  # Keep reference in stats for pipeline access
 
     return betas, stats

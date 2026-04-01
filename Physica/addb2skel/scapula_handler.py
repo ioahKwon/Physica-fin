@@ -375,7 +375,7 @@ def compute_shoulder_losses(
     )
 
     # Humerus alignment loss (direction matching)
-    losses['humerus_align'] = 0.5 * scapula_handler.compute_humerus_alignment_loss(
+    losses['humerus_align'] = getattr(config, 'weight_humerus_align', 0.5) * scapula_handler.compute_humerus_alignment_loss(
         skel_joints, addb_joints
     )
 
@@ -389,7 +389,7 @@ def compute_shoulder_losses(
     )
 
     # Humerus regularization
-    losses['humerus_reg'] = 0.05 * scapula_handler.compute_humerus_regularization(
+    losses['humerus_reg'] = getattr(config, 'weight_humerus_reg', 0.05) * scapula_handler.compute_humerus_regularization(
         skel_poses
     )
 

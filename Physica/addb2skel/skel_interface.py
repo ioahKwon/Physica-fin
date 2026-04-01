@@ -100,7 +100,9 @@ class SKELInterface:
         betas: torch.Tensor,
         poses: torch.Tensor,
         trans: torch.Tensor,
+        dJ: Optional[torch.Tensor] = None,
         return_skeleton: bool = False,
+        return_joints_ori: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass through SKEL model.
@@ -109,12 +111,15 @@ class SKELInterface:
             betas: Shape parameters [B, 10] or [10].
             poses: Pose parameters [B, 46] or [46].
             trans: Translation [B, 3] or [3].
+            dJ: Joint offset corrections [B, 24, 3] or [1, 24, 3]. Default: None (no offset).
             return_skeleton: Whether to return skeleton mesh vertices.
+            return_joints_ori: Whether to return per-joint rotation matrices [B, 24, 3, 3].
 
         Returns:
             vertices: Skin mesh vertices [B, V, 3].
             joints: Joint positions [B, 24, 3].
-            skel_vertices: Skeleton mesh vertices [B, V_skel, 3] if return_skeleton.
+            skel_vertices: Skeleton mesh vertices [B, V_skel, 3] if return_skeleton,
+                           OR joints_ori [B, 24, 3, 3] if return_joints_ori (mutually exclusive).
         """
         # Ensure batch dimension
         if betas.dim() == 1:
@@ -130,6 +135,10 @@ class SKELInterface:
         if betas.shape[0] == 1 and B > 1:
             betas = betas.expand(B, -1)
 
+        # Expand dJ if needed
+        if dJ is not None and dJ.shape[0] == 1 and B > 1:
+            dJ = dJ.expand(B, -1, -1)
+
         # Forward through SKEL (uses 'skelmesh' parameter, not 'return_skel')
         output = self.model(
             poses=poses,
@@ -137,11 +146,15 @@ class SKELInterface:
             trans=trans,
             poses_type='skel',
             skelmesh=return_skeleton,
+            dJ=dJ,
             pose_dep_bs=True,
         )
 
         vertices = output.skin_verts
         joints = output.joints
+
+        if return_joints_ori and hasattr(output, 'joints_ori') and output.joints_ori is not None:
+            return vertices, joints, output.joints_ori
 
         if return_skeleton and hasattr(output, 'skel_verts'):
             skel_vertices = output.skel_verts
@@ -154,6 +167,7 @@ class SKELInterface:
         betas: torch.Tensor,
         poses: torch.Tensor,
         trans: torch.Tensor,
+        dJ: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute joint positions only (faster than full forward).
@@ -162,11 +176,12 @@ class SKELInterface:
             betas: Shape parameters [B, 10] or [10].
             poses: Pose parameters [B, 46] or [46].
             trans: Translation [B, 3] or [3].
+            dJ: Joint offset corrections [B, 24, 3] or [1, 24, 3].
 
         Returns:
             joints: Joint positions [B, 24, 3].
         """
-        _, joints, _ = self.forward(betas, poses, trans, return_skeleton=False)
+        _, joints, _ = self.forward(betas, poses, trans, dJ=dJ, return_skeleton=False)
         return joints
 
     def get_virtual_acromial(
@@ -325,8 +340,10 @@ def create_skel_interface(
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    # Re-read from config module at runtime (allows override via run_single_trial.py)
+    from . import config as _cfg
     return SKELInterface(
-        model_path=SKEL_MODEL_PATH,
+        model_path=_cfg.SKEL_MODEL_PATH,
         gender=gender,
         device=torch.device(device),
     )

@@ -133,8 +133,8 @@ ADDB_TO_SKEL_MAPPING: Dict[str, JointMapping] = {
         "Right ankle → talus_r", use_in_loss=True
     ),
     'subtalar_r': JointMapping(
-        'subtalar_r', ['calcn_r'], MappingType.SEGMENT,
-        "Right hindfoot segment frame", use_in_loss=False
+        'subtalar_r', ['calcn_r'], MappingType.APPROXIMATE,
+        "Right hindfoot — ~10mm Y offset, subtalar axis ≠ calcaneus origin", use_in_loss=True
     ),
     'mtp_r': JointMapping(
         'mtp_r', ['toes_r'], MappingType.DIRECT,
@@ -155,8 +155,8 @@ ADDB_TO_SKEL_MAPPING: Dict[str, JointMapping] = {
         "Left ankle → talus_l", use_in_loss=True
     ),
     'subtalar_l': JointMapping(
-        'subtalar_l', ['calcn_l'], MappingType.SEGMENT,
-        "Left hindfoot segment frame", use_in_loss=False
+        'subtalar_l', ['calcn_l'], MappingType.APPROXIMATE,
+        "Left hindfoot — ~10mm Y offset, subtalar axis ≠ calcaneus origin", use_in_loss=True
     ),
     'mtp_l': JointMapping(
         'mtp_l', ['toes_l'], MappingType.DIRECT,
@@ -165,16 +165,16 @@ ADDB_TO_SKEL_MAPPING: Dict[str, JointMapping] = {
 
     # Spine - back → lumbar (per working compare_smpl_skel.py: back → lumbar_body)
     'back': JointMapping(
-        'back', ['lumbar'], MappingType.DIRECT,
-        "Back → lumbar for optimization", use_in_loss=True
+        'back', ['lumbar'], MappingType.APPROXIMATE,
+        "AddB single spine → SKEL lumbar (1:3 mismatch: lumbar/thorax/head)", use_in_loss=True
     ),
 
     # Right arm
     # Acromial → scapula (not humerus) - scapula is more lateral, closer to surface
     # Note: humerus (glenohumeral) is ~30-40mm medial to acromial, causing narrow shoulders
     'acromial_r': JointMapping(
-        'acromial_r', ['scapula_r'], MappingType.DIRECT,
-        "Right acromial → scapula (more lateral than humerus)",
+        'acromial_r', ['scapula_r'], MappingType.PROXY,
+        "Acromion surface landmark ≠ scapula joint (not anatomically equivalent)",
         use_in_loss=True
     ),
     'elbow_r': JointMapping(
@@ -192,8 +192,8 @@ ADDB_TO_SKEL_MAPPING: Dict[str, JointMapping] = {
 
     # Left arm
     'acromial_l': JointMapping(
-        'acromial_l', ['scapula_l'], MappingType.DIRECT,
-        "Left acromial → scapula (more lateral than humerus)",
+        'acromial_l', ['scapula_l'], MappingType.PROXY,
+        "Acromion surface landmark ≠ scapula joint (not anatomically equivalent)",
         use_in_loss=True
     ),
     'elbow_l': JointMapping(
@@ -309,6 +309,7 @@ RELIABLE_BONE_PAIRS_ADDB = [
     ('hip_l', 'walker_knee_l'),
     ('walker_knee_r', 'ankle_r'),
     ('walker_knee_l', 'ankle_l'),
+    # foot excluded: AddB mtp ≠ SKEL toes (20% structural mismatch pollutes beta)
     ('elbow_r', 'radioulnar_r'),
     ('elbow_l', 'radioulnar_l'),
 ]
@@ -320,6 +321,7 @@ RELIABLE_BONE_PAIRS_SKEL = [
     ('femur_l', 'tibia_l'),
     ('tibia_r', 'talus_r'),
     ('tibia_l', 'talus_l'),
+    # foot excluded: AddB mtp ≠ SKEL toes (20% structural mismatch pollutes beta)
     ('ulna_r', 'radius_r'),
     ('ulna_l', 'radius_l'),
 ]
@@ -346,6 +348,10 @@ SKEL_SCAPULA_R_IDX = SKEL_JOINT_TO_IDX['scapula_r']    # 14
 SKEL_SCAPULA_L_IDX = SKEL_JOINT_TO_IDX['scapula_l']    # 19
 SKEL_HUMERUS_R_IDX = SKEL_JOINT_TO_IDX['humerus_r']    # 15
 SKEL_HUMERUS_L_IDX = SKEL_JOINT_TO_IDX['humerus_l']    # 20
+
+# AddB subtalar (heel) indices — excluded from MPJPE due to structural mismatch
+ADDB_SUBTALAR_R_IDX = ADDB_JOINT_TO_IDX['subtalar_r']  # 4
+ADDB_SUBTALAR_L_IDX = ADDB_JOINT_TO_IDX['subtalar_l']  # 9
 
 # SKEL spine indices
 SKEL_LUMBAR_IDX = SKEL_JOINT_TO_IDX['lumbar']          # 11

@@ -70,11 +70,11 @@ def skel_to_addb_joints(skel_joints: np.ndarray) -> np.ndarray:
         addb_idx = ADDB_JOINT_TO_IDX[addb_name]
         addb_joints[:, addb_idx, :] = skel_joints[:, skel_idx, :]
 
-    # Torso = average of lumbar and thorax
-    addb_joints[:, ADDB_JOINT_TO_IDX['torso'], :] = (
-        skel_joints[:, SKEL_JOINT_TO_IDX['lumbar'], :] +
-        skel_joints[:, SKEL_JOINT_TO_IDX['thorax'], :]
-    ) / 2
+    # Back = lumbar (DIRECT mapping, consistent with joint_definitions.py)
+    # Previously used (lumbar+thorax)/2 which was 180mm from GT; lumbar alone is 31mm
+    addb_joints[:, ADDB_JOINT_TO_IDX['back'], :] = (
+        skel_joints[:, SKEL_JOINT_TO_IDX['lumbar'], :]
+    )
 
     # Acromial = approximate from humerus (slightly lateral/superior)
     # In reality AddB acromial is a surface landmark, but for testing

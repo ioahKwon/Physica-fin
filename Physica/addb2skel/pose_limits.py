@@ -85,7 +85,7 @@ COMPREHENSIVE_POSE_LIMITS = {
     # =========================================================================
     'pelvis_tilt': [-0.35, 0.70],       # DOF 0: -20° to 40° (posterior to anterior)
     'pelvis_list': [-0.52, 0.52],       # DOF 1: ±30° (lateral drop during gait)
-    'pelvis_rotation': [-0.79, 0.79],   # DOF 2: ±45° (transverse rotation)
+    'pelvis_rotation': [-1.57, 1.57],   # DOF 2: ±90° (expanded — gait/running needs full range)
 
     # =========================================================================
     # HIP (DOF 3-5, 10-12) - Literature based
@@ -139,8 +139,8 @@ COMPREHENSIVE_POSE_LIMITS = {
     # RIGHT SCAPULA (DOF 26-28) - SKEL Official
     # =========================================================================
     'scapula_abduction_r': [-0.63, 0.63],   # DOF 26: ±36°
-    'scapula_elevation_r': [-0.4, -0.1],    # DOF 27: -23° to -6° (always negative)
-    'scapula_upward_rot_r': [-0.19, 0.32],  # DOF 28: -11° to 18°
+    'scapula_elevation_r': [-0.4, 0.2],     # DOF 27: -23° to 11° (expanded — was too tight at -0.1)
+    'scapula_upward_rot_r': [-0.52, 0.52],  # DOF 28: ±30° (expanded — was too tight, caused clamping)
 
     # =========================================================================
     # RIGHT SHOULDER (DOF 29-31) - Mixed
@@ -164,14 +164,14 @@ COMPREHENSIVE_POSE_LIMITS = {
     # Note: scapula_elevation_l is flipped compared to right
     # =========================================================================
     'scapula_abduction_l': [-0.63, 0.63],   # DOF 36: ±36°
-    'scapula_elevation_l': [-0.4, -0.1],    # DOF 37: -23° to -6° (negative range)
-    'scapula_upward_rot_l': [-0.21, 0.22],  # DOF 38: -12° to 13°
+    'scapula_elevation_l': [-0.4, 0.2],     # DOF 37: -23° to 11° (expanded — was too tight at -0.1)
+    'scapula_upward_rot_l': [-0.52, 0.52],  # DOF 38: ±30° (expanded — was too tight, caused clamping)
 
     # =========================================================================
     # LEFT SHOULDER (DOF 39-41) - Mixed
     # Note: shoulder_l_y is NOT in SKEL official (only shoulder_r_y)
     # =========================================================================
-    'shoulder_l_x': [-1.05, 3.14],      # DOF 39: -60° to 180° (same as right)
+    'shoulder_l_x': [-1.57, 3.14],      # DOF 39: -90° to 180° (expanded — was clamped at -60°)
     'shoulder_l_y': [-1.57, 1.57],      # DOF 40: ±90° (added, not in SKEL official)
     'shoulder_l_z': [-1.57, 1.57],      # DOF 41: ±90° (same as right)
 
@@ -228,6 +228,31 @@ def clamp_poses(
         Clamped poses with same shape as input
     """
     return torch.clamp(poses, lower, upper)
+
+
+def compute_soft_limit_penalty(
+    poses: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
+    margin: float = 0.0,
+) -> torch.Tensor:
+    """
+    Soft DOF limit penalty: preserves gradients at boundaries (unlike hard clamp).
+
+    Loss = mean( relu(pose - (upper+margin))² + relu((lower-margin) - pose)² )
+
+    Args:
+        poses: Pose tensor [B, 46] or [46]
+        lower: Lower bounds [46]
+        upper: Upper bounds [46]
+        margin: Extra margin beyond bounds before penalty kicks in (radians)
+
+    Returns:
+        Scalar penalty loss
+    """
+    over = torch.relu(poses - (upper + margin))
+    under = torch.relu((lower - margin) - poses)
+    return (over ** 2 + under ** 2).mean()
 
 
 def get_pose_limit_for_param(param_name: str) -> Tuple[float, float]:
