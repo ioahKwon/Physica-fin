@@ -293,6 +293,11 @@ def main():
     # Config: Fix K defaults (2026-04-02) — all settings in config.py defaults
     config = OptimizationConfig(device=args.device)
 
+    # Override paths for HPCC (bsm_markers.yaml lives next to this script)
+    bsm_path = os.path.join(_SCRIPT_DIR, 'bsm_markers.yaml')
+    if os.path.exists(bsm_path):
+        config.bsm_markers_path = bsm_path
+
     # dt from trial metadata (for temporal smoothness normalization)
     config.dt = 1.0 / metadata['fps']
 
