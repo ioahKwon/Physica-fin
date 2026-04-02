@@ -1992,10 +1992,6 @@ class PoseOptimizer:
         pred = skel_joints[:, self.skel_indices, :]
         target = addb_joints[:, self.addb_indices, :]
 
-        # W-MPJPE: per-frame root alignment (pelvis = index 0)
-        offset = (target[:, 0:1, :] - pred[:, 0:1, :])  # [T, 1, 3]
-        pred = pred + offset
-
         if exclude_acromial:
             exclude_indices = []
             for i, addb_idx in enumerate(self.addb_indices):
@@ -2019,23 +2015,14 @@ class PoseOptimizer:
         skel_joints: torch.Tensor,
         addb_joints: torch.Tensor,
     ) -> Dict[str, float]:
-        """Compute W-MPJPE style per-joint error in mm.
-
-        Per-frame root alignment: shift pred so pred_pelvis = gt_pelvis,
-        then compute per-joint L2 error. Equivalent to root-relative MPJPE.
-        """
+        """Compute absolute per-joint error in mm (same coordinate system)."""
         from .joint_definitions import ADDB_JOINTS
-
-        # Per-frame root alignment (W-MPJPE style)
-        pred_root = skel_joints[:, self.skel_indices[0], :]   # [T, 3] pelvis
-        target_root = addb_joints[:, self.addb_indices[0], :] # [T, 3] pelvis
-        offset = (target_root - pred_root).unsqueeze(1)        # [T, 1, 3]
 
         errors = {}
         for i, (addb_idx, skel_idx) in enumerate(zip(self.addb_indices, self.skel_indices)):
-            pred_aligned = skel_joints[:, skel_idx, :] + offset.squeeze(1)
+            pred = skel_joints[:, skel_idx, :]
             target = addb_joints[:, addb_idx, :]
-            error = torch.norm(pred_aligned - target, dim=-1).mean().item() * 1000
+            error = torch.norm(pred - target, dim=-1).mean().item() * 1000
             errors[ADDB_JOINTS[addb_idx]] = error
 
         return errors
@@ -2776,9 +2763,8 @@ def finetune_foot(
         mpjpe = optimizer_obj._compute_mpjpe(skel_joints, addb_joints_t)
         per_joint_error = optimizer_obj._compute_per_joint_error(skel_joints, addb_joints_t)
 
-        # Foot-specific metrics (W-MPJPE: root-aligned)
-        offset = (addb_joints_t[:, 0:1, :] - skel_joints[:, 0:1, :])  # pelvis alignment
-        pred_foot = skel_joints[:, SKEL_FOOT_JOINTS, :] + offset
+        # Foot-specific metrics (absolute)
+        pred_foot = skel_joints[:, SKEL_FOOT_JOINTS, :]
         target_foot = addb_joints_t[:, ADDB_FOOT_JOINTS, :]
         foot_mpjpe = torch.norm(pred_foot - target_foot, dim=-1).mean().item() * 1000
 
