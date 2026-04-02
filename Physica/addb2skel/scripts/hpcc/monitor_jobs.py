@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-TOTAL_WITH_ARM = 13206
+TOTAL_WITH_ARM = 12154  # From with_arm_manifest.csv (Fix K, 2026-04-02)
 
 
 def collect_metrics(output_dir):
@@ -29,7 +29,7 @@ def collect_metrics(output_dir):
 
     results = {
         'success': [],
-        'error_12joints': [],
+        'skipped_child': [],
         'error_other': [],
         'total_files': 0,
         'first_time': None,
@@ -54,8 +54,8 @@ def collect_metrics(output_dir):
         status = m.get('status', '')
         if status == 'success':
             results['success'].append(m)
-        elif '12' in status or 'Expected 20' in status:
-            results['error_12joints'].append(m)
+        elif status == 'skipped_child':
+            results['skipped_child'].append(m)
         else:
             results['error_other'].append(m)
 
@@ -91,19 +91,19 @@ def print_summary(results, clear=True):
         os.system('clear' if os.name != 'nt' else 'cls')
 
     n_success = len(results['success'])
-    n_skip = len(results['error_12joints'])
+    n_skip = len(results['skipped_child'])
     n_err = len(results['error_other'])
     n_total = results['total_files']
     now = time.time()
 
     print("=" * 80)
-    print(f"  addb2skel HPCC Batch Monitor — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  addb2skel HPCC Batch Monitor (Fix K) — {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     print()
 
     # Progress bar
-    print(f"  With_Arm Progress:  {progress_bar(n_success, TOTAL_WITH_ARM)}")
-    print(f"                      {n_success:,} / {TOTAL_WITH_ARM:,} completed")
+    print(f"  Progress:  {progress_bar(n_total, TOTAL_WITH_ARM)}")
+    print(f"             {n_success:,} success / {n_skip:,} child-skip / {n_err:,} error  ({n_total:,} / {TOTAL_WITH_ARM:,})")
     print()
 
     # ETA calculation
@@ -127,8 +127,8 @@ def print_summary(results, clear=True):
 
     # Summary counts
     print(f"  Total processed:  {n_total:>6}")
-    print(f"    ✓ Success:      {n_success:>6}  (With_Arm, 20 joints)")
-    print(f"    ○ Skipped:      {n_skip:>6}  (No_Arm, 12 joints)")
+    print(f"    ✓ Success:      {n_success:>6}")
+    print(f"    ○ Child skip:   {n_skip:>6}")
     print(f"    ✗ Errors:       {n_err:>6}")
     print()
 
@@ -142,18 +142,24 @@ def print_summary(results, clear=True):
                       f"{m.get('status', '?')[:80]}")
         return
 
-    # Aggregate metrics
+    # Aggregate metrics (current format: flat keys in metrics.json)
     mpjpe_vals = [m['mpjpe_mm'] for m in results['success'] if m.get('mpjpe_mm') is not None]
 
-    # Evaluation metrics
-    eval_keys = ['MPJPE_root_rel', 'W-MPJPE', 'PA-MPJPE', 'ACCL', 'VEL', 'Foot_Sliding', 'Ground_Penetration']
+    eval_keys = [
+        ('mpjpe_mm', 'MPJPE', 'mm'),
+        ('pa_mpjpe_mm', 'PA-MPJPE', 'mm'),
+        ('accel_error', 'Accel Error', 'mm/f²'),
+        ('vel_error', 'Vel Error', 'mm/f'),
+        ('foot_sliding_mm', 'Foot Sliding', 'mm'),
+        ('ground_penetration_mm', 'Ground Penetration', 'mm'),
+        ('marker_mpjpe_mm', 'Marker MPJPE', 'mm'),
+    ]
     eval_data = defaultdict(list)
     for m in results['success']:
-        em = m.get('evaluation_metrics', {})
-        if em:
-            for k in eval_keys:
-                if k in em and em[k] is not None:
-                    eval_data[k].append(em[k])
+        for key, label, unit in eval_keys:
+            val = m.get(key)
+            if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                eval_data[label].append(val)
 
     # Per-joint errors
     joint_errors = defaultdict(list)
@@ -173,16 +179,17 @@ def print_summary(results, clear=True):
     print(f"  {'Metric':<30} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10} {'Unit':>10}")
     print("-" * 80)
 
-    if mpjpe_vals:
-        a = np.array(mpjpe_vals)
-        print(f"  {'MPJPE (pipeline)':<30} {a.mean():>10.2f} {a.std():>10.2f} {a.min():>10.2f} {a.max():>10.2f} {'mm':>10}")
+    for key, label, unit in eval_keys:
+        if label in eval_data and len(eval_data[label]) > 0:
+            a = np.array(eval_data[label])
+            print(f"  {label:<30} {a.mean():>10.2f} {a.std():>10.2f} {a.min():>10.2f} {a.max():>10.2f} {unit:>10}")
 
-    for k in eval_keys:
-        if k in eval_data and len(eval_data[k]) > 0:
-            a = np.array(eval_data[k])
-            unit = 'mm' if 'MPJPE' in k or 'Sliding' in k or 'Penetration' in k else 'mm/f²' if 'ACCL' in k else 'mm/f'
-            label = k.replace('_', ' ')
-            print(f"  {label:<30} {a.mean():>10.3f} {a.std():>10.3f} {a.min():>10.3f} {a.max():>10.3f} {unit:>10}")
+    # Marker matching stats
+    mk_t1 = [m.get('marker_t1', 0) for m in results['success']]
+    mk_t2 = [m.get('marker_t2', 0) for m in results['success']]
+    if mk_t1:
+        print(f"  {'Markers T1 (mean)':<30} {np.mean(mk_t1):>10.1f}")
+        print(f"  {'Markers T2 (mean)':<30} {np.mean(mk_t2):>10.1f}")
 
     print("-" * 80)
     print()
@@ -223,19 +230,19 @@ def print_summary(results, clear=True):
             print(f"  {cat:<25} {len(vals):>6} {a.mean():>12.2f} {a.std():>10.2f}")
         print()
 
-    # Per-gender breakdown
-    gender_mpjpe = defaultdict(list)
+    # Per-sex breakdown
+    sex_mpjpe = defaultdict(list)
     for m in results['success']:
-        g = m.get('gender', 'unknown')
+        s = m.get('sex', 'unknown')
         if m.get('mpjpe_mm') is not None:
-            gender_mpjpe[g].append(m['mpjpe_mm'])
+            sex_mpjpe[s].append(m['mpjpe_mm'])
 
-    if len(gender_mpjpe) > 1:
-        print(f"  {'Gender':<25} {'N':>6} {'Mean MPJPE':>12} {'Std':>10}")
+    if len(sex_mpjpe) > 1:
+        print(f"  {'Sex':<25} {'N':>6} {'Mean MPJPE':>12} {'Std':>10}")
         print("-" * 60)
-        for g, vals in sorted(gender_mpjpe.items()):
+        for s, vals in sorted(sex_mpjpe.items()):
             a = np.array(vals)
-            print(f"  {g:<25} {len(vals):>6} {a.mean():>12.2f} {a.std():>10.2f}")
+            print(f"  {s:<25} {len(vals):>6} {a.mean():>12.2f} {a.std():>10.2f}")
         print()
 
     # Recent errors
