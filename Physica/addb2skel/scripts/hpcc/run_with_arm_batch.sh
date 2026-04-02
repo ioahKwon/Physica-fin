@@ -38,24 +38,18 @@ conda activate physpt
 # ---- Paths ----
 SCRIPT_DIR="/mnt/research/domolab/kwonjoon/Code/Physica/addb2skel/scripts/hpcc"
 cd "${SCRIPT_DIR}"
-MANIFEST="${SCRIPT_DIR}/trial_manifest.csv"
-TASK_ID_FILE="${SCRIPT_DIR}/with_arm_task_ids.txt"
-OUTPUT_DIR="/mnt/scratch/kwonjoon/output/addb2skel"
+export PYTHONPATH="/mnt/research/domolab/kwonjoon/Code/Physica:/mnt/research/domolab/kwonjoon/Code/SKEL"
+MANIFEST="${SCRIPT_DIR}/with_arm_manifest.csv"
+OUTPUT_DIR="/mnt/scratch/kwonjoon/output/addb2skel_fixK"
 SKEL_MODEL_PATH="/mnt/research/domolab/kwonjoon/skel_models_v1.1"
 
 mkdir -p logs
 
-# ---- Map SLURM array index → manifest task_id ----
-LINE_NUM=$((SLURM_ARRAY_TASK_ID + 1))
-TASK_ID=$(sed -n "${LINE_NUM}p" "${TASK_ID_FILE}")
-
-if [ -z "${TASK_ID}" ]; then
-    echo "ERROR: No task_id found at line ${LINE_NUM} in ${TASK_ID_FILE}"
-    exit 1
-fi
+# ---- SLURM array index = manifest task_id (direct mapping) ----
+TASK_ID=${SLURM_ARRAY_TASK_ID}
 
 echo "=========================================="
-echo "SLURM Job: ${SLURM_JOB_ID}, Array Index: ${SLURM_ARRAY_TASK_ID} → Task ID: ${TASK_ID}"
+echo "SLURM Job: ${SLURM_JOB_ID}, Task ID: ${TASK_ID}"
 echo "Node: $(hostname), GPU: ${CUDA_VISIBLE_DEVICES}"
 echo "Time: $(date)"
 echo "=========================================="
