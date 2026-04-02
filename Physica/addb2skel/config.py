@@ -333,15 +333,12 @@ class OptimizationConfig:
     # These markers were excluded based on empirical error analysis, but some may be
     # recoverable with better vertex mapping or fitting. Needs re-evaluation.
     marker_blacklist: List[str] = field(default_factory=lambda: [
-        # Head markers: SKEL head has only 3 DOFs, insufficient to match 4 head markers
+        # Head markers: SKEL head has 3 DOFs, 4 markers → 100mm+ residual, no MPJPE benefit
         'LFHD', 'RFHD', 'LBHD', 'RBHD',
         # Force plate / calibration markers (NOT body markers)
         'FL', 'FR', 'BL', 'BR',                       # force plate corners (Carter2023)
         'LPT', 'RPT',                                 # force plate markers
         'FP1', 'FP2', 'FP3', 'FP4',                   # force plate numbered
-        # NOTE: LTOE/RTOE removed from blacklist — handled by T1_REDIRECT_TABLE (→LTOS/RTOS)
-        # NOTE: LANKMED/RANKMED removed — now correctly aliased to LAKI/RAKI
-        # NOTE: Pelvis/spine markers (SACR, LPSI, T10 etc.) removed — all valid BSM markers
     ])
 
     # ==========================================================================
