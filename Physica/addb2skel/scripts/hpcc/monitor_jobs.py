@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""
+Real-time monitoring of HPCC addb2skel batch jobs.
+
+Usage (from domogpu):
+    ssh hpcc "ssh dev-amd24-h200 'ml purge && ml Miniforge3 && conda activate physpt && \
+        cd /mnt/research/domolab/kwonjoon/Code/Physica/addb2skel/scripts/hpcc && \
+        python monitor_jobs.py --interval 0'"
+"""
+
+import argparse
+import json
+import os
+import glob
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import numpy as np
+
+TOTAL_WITH_ARM = 13206
+
+
+def collect_metrics(output_dir):
+    """Scan all metrics.json files and aggregate results."""
+    metrics_files = glob.glob(os.path.join(output_dir, '*/trial_*/metrics.json'))
+
+    results = {
+        'success': [],
+        'error_12joints': [],
+        'error_other': [],
+        'total_files': 0,
+        'first_time': None,
+        'last_time': None,
+    }
+
+    for mf in metrics_files:
+        results['total_files'] += 1
+        try:
+            with open(mf) as f:
+                m = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            continue
+
+        # Track file modification times for ETA
+        mtime = os.path.getmtime(mf)
+        if results['first_time'] is None or mtime < results['first_time']:
+            results['first_time'] = mtime
+        if results['last_time'] is None or mtime > results['last_time']:
+            results['last_time'] = mtime
+
+        status = m.get('status', '')
+        if status == 'success':
+            results['success'].append(m)
+        elif '12' in status or 'Expected 20' in status:
+            results['error_12joints'].append(m)
+        else:
+            results['error_other'].append(m)
+
+    return results
+
+
+def progress_bar(current, total, width=40):
+    """Create a text progress bar."""
+    if total == 0:
+        return '[' + ' ' * width + ']'
+    pct = current / total
+    filled = int(width * pct)
+    bar = '█' * filled + '░' * (width - filled)
+    return f'[{bar}] {pct*100:5.1f}%'
+
+
+def format_duration(seconds):
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m {s}s"
+    else:
+        h, remainder = divmod(int(seconds), 3600)
+        m, s = divmod(remainder, 60)
+        return f"{h}h {m}m"
+
+
+def print_summary(results, clear=True):
+    """Print formatted summary table."""
+    if clear:
+        os.system('clear' if os.name != 'nt' else 'cls')
+
+    n_success = len(results['success'])
+    n_skip = len(results['error_12joints'])
+    n_err = len(results['error_other'])
+    n_total = results['total_files']
+    now = time.time()
+
+    print("=" * 80)
+    print(f"  addb2skel HPCC Batch Monitor — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 80)
+    print()
+
+    # Progress bar
+    print(f"  With_Arm Progress:  {progress_bar(n_success, TOTAL_WITH_ARM)}")
+    print(f"                      {n_success:,} / {TOTAL_WITH_ARM:,} completed")
+    print()
+
+    # ETA calculation
+    if n_success > 0 and results['first_time'] and results['last_time']:
+        elapsed = results['last_time'] - results['first_time']
+        if elapsed > 0 and n_success > 1:
+            rate = n_success / elapsed  # trials per second
+            remaining = TOTAL_WITH_ARM - n_success
+            eta_seconds = remaining / rate
+            eta_time = datetime.now() + timedelta(seconds=eta_seconds)
+
+            print(f"  Elapsed:       {format_duration(elapsed)}")
+            print(f"  Rate:          {rate*60:.1f} trials/min  ({1/rate:.1f}s per trial)")
+            print(f"  Remaining:     {remaining:,} trials")
+            print(f"  ETA:           {format_duration(eta_seconds)}  (finish ~{eta_time.strftime('%H:%M')})")
+        elif n_success == 1:
+            t = results['success'][0].get('timing', {}).get('convert_s', 230)
+            eta_seconds = (TOTAL_WITH_ARM - 1) * t / 200  # assume 200 parallel
+            print(f"  ETA (est):     ~{format_duration(eta_seconds)} (assuming 200 parallel jobs)")
+    print()
+
+    # Summary counts
+    print(f"  Total processed:  {n_total:>6}")
+    print(f"    ✓ Success:      {n_success:>6}  (With_Arm, 20 joints)")
+    print(f"    ○ Skipped:      {n_skip:>6}  (No_Arm, 12 joints)")
+    print(f"    ✗ Errors:       {n_err:>6}")
+    print()
+
+    if n_success == 0:
+        print("  No successful trials yet. Waiting for results...")
+        print()
+        if n_err > 0:
+            print("  Recent errors:")
+            for m in results['error_other'][-5:]:
+                print(f"    {m.get('subject_id', '?')}/trial_{m.get('trial_idx', '?')}: "
+                      f"{m.get('status', '?')[:80]}")
+        return
+
+    # Aggregate metrics
+    mpjpe_vals = [m['mpjpe_mm'] for m in results['success'] if m.get('mpjpe_mm') is not None]
+
+    # Evaluation metrics
+    eval_keys = ['MPJPE_root_rel', 'W-MPJPE', 'PA-MPJPE', 'ACCL', 'VEL', 'Foot_Sliding', 'Ground_Penetration']
+    eval_data = defaultdict(list)
+    for m in results['success']:
+        em = m.get('evaluation_metrics', {})
+        if em:
+            for k in eval_keys:
+                if k in em and em[k] is not None:
+                    eval_data[k].append(em[k])
+
+    # Per-joint errors
+    joint_errors = defaultdict(list)
+    for m in results['success']:
+        pje = m.get('per_joint_error', {})
+        if pje:
+            for jname, err in pje.items():
+                if err is not None:
+                    joint_errors[jname].append(err)
+
+    # Timing
+    times = [m.get('timing', {}).get('convert_s', 0) for m in results['success'] if m.get('timing')]
+    total_frames = sum(m.get('num_frames', 0) for m in results['success'])
+
+    # Print metrics table
+    print("-" * 80)
+    print(f"  {'Metric':<30} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10} {'Unit':>10}")
+    print("-" * 80)
+
+    if mpjpe_vals:
+        a = np.array(mpjpe_vals)
+        print(f"  {'MPJPE (pipeline)':<30} {a.mean():>10.2f} {a.std():>10.2f} {a.min():>10.2f} {a.max():>10.2f} {'mm':>10}")
+
+    for k in eval_keys:
+        if k in eval_data and len(eval_data[k]) > 0:
+            a = np.array(eval_data[k])
+            unit = 'mm' if 'MPJPE' in k or 'Sliding' in k or 'Penetration' in k else 'mm/f²' if 'ACCL' in k else 'mm/f'
+            label = k.replace('_', ' ')
+            print(f"  {label:<30} {a.mean():>10.3f} {a.std():>10.3f} {a.min():>10.3f} {a.max():>10.3f} {unit:>10}")
+
+    print("-" * 80)
+    print()
+
+    # Timing
+    if times:
+        t = np.array(times)
+        print(f"  Timing: {t.mean():.0f}s avg, {t.min():.0f}s min, {t.max():.0f}s max per trial")
+        print(f"  Total frames processed: {total_frames:,}")
+        fps = total_frames / t.sum() if t.sum() > 0 else 0
+        print(f"  Throughput: {fps:.1f} frames/sec (across all trials)")
+    print()
+
+    # Per-joint error table
+    if joint_errors:
+        print("-" * 80)
+        print(f"  {'Joint':<25} {'Mean (mm)':>10} {'Std':>10} {'Max':>10}")
+        print("-" * 80)
+        sorted_joints = sorted(joint_errors.items(), key=lambda x: np.mean(x[1]), reverse=True)
+        for jname, errs in sorted_joints:
+            a = np.array(errs)
+            print(f"  {jname:<25} {a.mean():>10.2f} {a.std():>10.2f} {a.max():>10.2f}")
+        print("-" * 80)
+        print()
+
+    # Per-category breakdown
+    cat_mpjpe = defaultdict(list)
+    for m in results['success']:
+        cat = m.get('category', 'unknown')
+        if m.get('mpjpe_mm') is not None:
+            cat_mpjpe[cat].append(m['mpjpe_mm'])
+
+    if len(cat_mpjpe) > 1:
+        print(f"  {'Category':<25} {'N':>6} {'Mean MPJPE':>12} {'Std':>10}")
+        print("-" * 60)
+        for cat, vals in sorted(cat_mpjpe.items()):
+            a = np.array(vals)
+            print(f"  {cat:<25} {len(vals):>6} {a.mean():>12.2f} {a.std():>10.2f}")
+        print()
+
+    # Per-gender breakdown
+    gender_mpjpe = defaultdict(list)
+    for m in results['success']:
+        g = m.get('gender', 'unknown')
+        if m.get('mpjpe_mm') is not None:
+            gender_mpjpe[g].append(m['mpjpe_mm'])
+
+    if len(gender_mpjpe) > 1:
+        print(f"  {'Gender':<25} {'N':>6} {'Mean MPJPE':>12} {'Std':>10}")
+        print("-" * 60)
+        for g, vals in sorted(gender_mpjpe.items()):
+            a = np.array(vals)
+            print(f"  {g:<25} {len(vals):>6} {a.mean():>12.2f} {a.std():>10.2f}")
+        print()
+
+    # Recent errors
+    if n_err > 0:
+        print(f"  Recent errors ({n_err} total):")
+        for m in results['error_other'][-5:]:
+            print(f"    {m.get('subject_id', '?')}/trial_{m.get('trial_idx', '?')}: "
+                  f"{m.get('status', '?')[:80]}")
+        print()
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Monitor HPCC addb2skel batch jobs')
+    parser.add_argument('--output_dir', type=str,
+                        default='/mnt/scratch/kwonjoon/output/addb2skel',
+                        help='Output directory with results')
+    parser.add_argument('--interval', type=int, default=30,
+                        help='Refresh interval in seconds (0 = run once)')
+    args = parser.parse_args()
+
+    if args.interval == 0:
+        results = collect_metrics(args.output_dir)
+        print_summary(results, clear=False)
+    else:
+        print(f"Monitoring {args.output_dir} every {args.interval}s... (Ctrl+C to stop)")
+        try:
+            while True:
+                results = collect_metrics(args.output_dir)
+                print_summary(results)
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+
+
+if __name__ == '__main__':
+    main()
