@@ -370,31 +370,14 @@ def compute_shoulder_losses(
     _zero = torch.tensor(0.0, device=skel_joints.device)
     losses = {}
 
-    # Virtual acromial loss (skip when weight=0)
-    if config.weight_shoulder > 0:
-        losses['acromial'] = config.weight_shoulder * scapula_handler.compute_acromial_loss(
-            skel_vertices, addb_joints)
-    else:
-        losses['acromial'] = _zero
-
-    # Humerus alignment loss (skip when weight=0)
-    w_ha = getattr(config, 'weight_humerus_align', 0.0)
-    if w_ha > 0:
-        losses['humerus_align'] = w_ha * scapula_handler.compute_humerus_alignment_loss(
-            skel_joints, addb_joints)
-    else:
-        losses['humerus_align'] = _zero
-
-    losses['humerus_on_line'] = _zero  # permanently disabled
-
-    # Scapula regularization (skip when weight=0)
+    # Scapula regularization (DOFs → 0, keeps shoulder neutral)
     if config.weight_scapula_reg > 0:
         losses['scapula_reg'] = config.weight_scapula_reg * scapula_handler.compute_scapula_regularization(
             skel_poses)
     else:
         losses['scapula_reg'] = _zero
 
-    # Humerus regularization (skip when weight=0)
+    # Humerus regularization (DOFs → 0, keeps arm neutral)
     w_hr = getattr(config, 'weight_humerus_reg', 0.0)
     if w_hr > 0:
         losses['humerus_reg'] = w_hr * scapula_handler.compute_humerus_regularization(

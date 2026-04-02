@@ -987,49 +987,38 @@ class PoseOptimizer:
             target_joints = addb_joints[:, self.addb_indices, :]
             joint_loss = self._compute_weighted_joint_loss(pred_joints_mapped, target_joints)
 
-            # 2. Bone direction loss
-            pred_bone_dirs = compute_bone_directions(skel_joints, self.skel_bone_indices)
-            bone_dir_loss = cosine_similarity_loss(pred_bone_dirs, target_bone_dirs)
-
-            # 3. Bone length loss
+            # 2. Bone length loss
             pred_bone_lengths = compute_bone_lengths(skel_joints, self.skel_bone_indices)
             bone_len_loss = F.mse_loss(pred_bone_lengths, target_bone_lengths)
 
-            # 4. Shoulder width loss
-            pred_width = self.skel.get_shoulder_width(skel_joints)
-            width_loss = F.mse_loss(pred_width, target_width)
+            # 3. Shoulder width loss
+            width_loss = torch.tensor(0.0, device=self.device)
+            if self.config.weight_width > 0:
+                pred_width = self.skel.get_shoulder_width(skel_joints)
+                width_loss = F.mse_loss(pred_width, target_width)
 
-            # 5. Shoulder/scapula losses
+            # 4. Scapula/Humerus regularization
             shoulder_losses = compute_shoulder_losses(
                 skel_verts, skel_joints, poses, addb_joints,
                 self.scapula_handler, self.config
             )
 
-            # 6. Pose regularization
+            # 5. Pose regularization
             pose_reg = self.config.weight_pose_reg * (poses ** 2).mean()
 
-            # 7. Spine regularization
+            # 6. Spine regularization
             spine_dofs = poses[:, SPINE_DOF_INDICES]
             spine_reg = self.config.weight_spine_reg * (spine_dofs ** 2).mean()
-
-            # 7a. Arm regularization (elbow/wrist — prevents over-flexion)
-            arm_dofs = poses[:, ARM_DOF_INDICES]
-            arm_reg = self.config.weight_arm_reg * (arm_dofs ** 2).mean()
 
             # Combine losses
             loss = (
                 self.config.weight_joint * joint_loss +
-                self.config.weight_bone_dir * bone_dir_loss +
                 self.config.weight_bone_len * bone_len_loss +
                 self.config.weight_width * width_loss +
-                shoulder_losses['acromial'] +
-                shoulder_losses['humerus_align'] +
-                shoulder_losses['humerus_on_line'] +
                 shoulder_losses['scapula_reg'] +
                 shoulder_losses['humerus_reg'] +
                 pose_reg +
-                spine_reg +
-                arm_reg
+                spine_reg
             )
 
             loss.backward()
@@ -1853,177 +1842,96 @@ class PoseOptimizer:
         Returns:
             Combined loss scalar
         """
-        # 1. Joint position loss (weighted, includes acromial→humerus)
+        # 1. Joint position loss (15 DIRECT joints, weighted Huber)
         pred_joints_mapped = skel_joints[:, self.skel_indices, :]
         target_joints = addb_joints[:, self.addb_indices, :]
         joint_loss = self._compute_weighted_joint_loss(pred_joints_mapped, target_joints)
 
-        # 2. Bone direction loss (skip computation when weight=0)
-        bone_dir_loss = torch.tensor(0.0, device=self.device)
-        if self.config.weight_bone_dir > 0:
-            pred_bone_dirs = compute_bone_directions(skel_joints, self.skel_bone_indices)
-            bone_dir_loss = cosine_similarity_loss(pred_bone_dirs, target_bone_dirs)
-
-        # 3. Bone length loss (weighted per-bone: shin priority)
+        # 2. Bone length loss (12 bone pairs, weighted per-bone)
         pred_bone_lengths = compute_bone_lengths(skel_joints, self.skel_bone_indices)
-        bone_len_diff_sq = (pred_bone_lengths - target_bone_lengths) ** 2  # [T, num_bones]
+        bone_len_diff_sq = (pred_bone_lengths - target_bone_lengths) ** 2
         bone_len_loss = (self.bone_weights.unsqueeze(0) * bone_len_diff_sq).mean()
 
-        # 4. Shoulder width loss (skip when weight=0)
+        # 3. Shoulder width loss (L/R scapula distance)
         width_loss = torch.tensor(0.0, device=self.device)
         if self.config.weight_width > 0:
             pred_width = self.skel.get_shoulder_width(skel_joints)
             width_loss = F.mse_loss(pred_width, target_width)
 
-        # 5. Shoulder/scapula losses
+        # 4. Scapula/Humerus regularization (from scapula_handler)
         shoulder_losses = compute_shoulder_losses(
             skel_verts, skel_joints, poses, addb_joints,
             self.scapula_handler, self.config
         )
 
-        # 6. Pose regularization
+        # 5. Pose regularization (all DOFs → 0)
         pose_reg = self.config.weight_pose_reg * (poses ** 2).mean()
 
-        # 7. Spine regularization
+        # 6. Spine regularization (spine DOFs → 0, prevents thorax over-extension)
         spine_dofs = poses[:, SPINE_DOF_INDICES]
         spine_reg = self.config.weight_spine_reg * (spine_dofs ** 2).mean()
 
-        # 7a. Arm regularization (skip when weight=0)
-        arm_reg = torch.tensor(0.0, device=self.device)
-        if self.config.weight_arm_reg > 0:
-            arm_dofs = poses[:, ARM_DOF_INDICES]
-            arm_reg = self.config.weight_arm_reg * (arm_dofs ** 2).mean()
-
-        # 7b. Foot DOF regularization (subtalar + mtp → keep close to init/0)
-        # AddB subtalar/mtp are typically 0; SKEL subtalar/mtp should not drift freely
-        foot_reg = torch.tensor(0.0, device=self.device)
-        foot_reg_weight = getattr(self.config, 'weight_foot_reg', 0.0)
-        if foot_reg_weight > 0:
-            # DOF indices: subtalar_r=8, mtp_r=9, subtalar_l=15, mtp_l=16
-            foot_dof_indices = [8, 9, 15, 16]
-            foot_dofs = poses[:, foot_dof_indices]
-            foot_reg = foot_reg_weight * (foot_dofs ** 2).mean()
-
-        # 7c. Foot height (Y-axis) loss — GRF critical
-        # Match heel/toe Y position to GT, reducing vertical offset
+        # 7. Foot height loss (Y-axis matching, GRF critical)
         foot_height_loss = torch.tensor(0.0, device=self.device)
-        foot_height_weight = getattr(self.config, 'weight_foot_height', 0.0)
-        if foot_height_weight > 0:
-            # SKEL indices: calcn_r=4, toes_r=5, calcn_l=9, toes_l=10
-            # AddB indices: subtalar_r=4, mtp_r=5, subtalar_l=9, mtp_l=10
-            skel_foot_idx = [4, 5, 9, 10]  # calcn_r, toes_r, calcn_l, toes_l
-            addb_foot_idx = [4, 5, 9, 10]  # subtalar_r, mtp_r, subtalar_l, mtp_l
-            pred_foot_y = skel_joints[:, skel_foot_idx, 1]  # [T, 4] Y only
-            target_foot_y = addb_joints[:, addb_foot_idx, 1]  # [T, 4] Y only
-            # Per-joint weight: calcn (idx 0, 2) = APPROXIMATE (subtalar-mapped), toes (idx 1, 3) = DIRECT
+        if self.config.weight_foot_height > 0:
+            skel_foot_idx = [4, 5, 9, 10]
+            addb_foot_idx = [4, 5, 9, 10]
+            pred_foot_y = skel_joints[:, skel_foot_idx, 1]
+            target_foot_y = addb_joints[:, addb_foot_idx, 1]
             approx_f = getattr(self.config, 'approximate_foot_weight_factor', 1.0)
             foot_w = torch.tensor([approx_f, 1.0, approx_f, 1.0], device=self.device)
-            foot_height_loss = foot_height_weight * (foot_w.view(1, -1) * (pred_foot_y - target_foot_y) ** 2).mean()
+            foot_height_loss = self.config.weight_foot_height * (foot_w.view(1, -1) * (pred_foot_y - target_foot_y) ** 2).mean()
 
-        # 8. Temporal smoothness (velocity + acceleration)
+        # 8. Temporal smoothness (DOF velocity + acceleration)
         temporal_loss = torch.tensor(0.0, device=self.device)
         dt = self.config.dt if self.config.adaptive_temporal else 1.0
         if use_temporal and T > 1:
-            # Pose velocity smoothness (dt-adaptive: normalize by dt → velocity units)
             pose_diff = poses[1:] - poses[:-1]
             temporal_loss = self.config.weight_temporal * ((pose_diff / dt) ** 2).mean()
-            # Translation velocity smoothness
             if trans is not None:
                 trans_diff = trans[1:] - trans[:-1]
                 temporal_loss = temporal_loss + self.config.weight_temporal * ((trans_diff / dt) ** 2).mean()
         if use_temporal and T > 2 and self.config.weight_acceleration > 0:
-            # Pose acceleration smoothness (dt-adaptive: normalize by dt² → acceleration units)
             pose_acc = poses[2:] - 2 * poses[1:-1] + poses[:-2]
             temporal_loss = temporal_loss + self.config.weight_acceleration * ((pose_acc / (dt ** 2)) ** 2).mean()
-            # Translation acceleration smoothness
             if trans is not None:
                 trans_acc = trans[2:] - 2 * trans[1:-1] + trans[:-2]
                 temporal_loss = temporal_loss + self.config.weight_acceleration * ((trans_acc / (dt ** 2)) ** 2).mean()
-        # 8a. Cartesian joint smoothness (operates on FK joint positions)
-        cartesian_smooth_loss = torch.tensor(0.0, device=self.device)
-        if use_temporal and T > 1 and self.config.weight_cartesian_temporal > 0:
-            joint_vel = skel_joints[1:] - skel_joints[:-1]
-            cartesian_smooth_loss = self.config.weight_cartesian_temporal * ((joint_vel / dt) ** 2).mean()
-        if use_temporal and T > 2 and self.config.weight_cartesian_acceleration > 0:
-            joint_acc = skel_joints[2:] - 2 * skel_joints[1:-1] + skel_joints[:-2]
-            cartesian_smooth_loss = cartesian_smooth_loss + self.config.weight_cartesian_acceleration * ((joint_acc / (dt ** 2)) ** 2).mean()
-        # 8b. DOF-space q-matching loss (Phase 3)
-        # Two modes: rotation matrix comparison (HSMR-style, default) or Euler angle comparison (legacy)
+
+        # 9. Q-match loss (DOF matching to AddB rotation reference, with warmup)
         q_match_loss = torch.tensor(0.0, device=self.device)
-        w_q = getattr(self.config, 'weight_q_match', 0.0)
+        w_q = self.config.weight_q_match
         if w_q > 0 and self._addb_q_reference is not None:
-            warmup = getattr(self.config, 'q_match_warmup_fraction', 0.3)
+            warmup = self.config.q_match_warmup_fraction
             progress = iteration / total_iters if total_iters > 0 else 1.0
             if progress >= warmup:
                 ramp = (progress - warmup) / (1.0 - warmup)
                 q_diff = (poses - self._addb_q_reference[:T]) * self._addb_q_mask
-                if getattr(self.config, 'q_match_confidence_weighted', True):
+                if self.config.q_match_confidence_weighted:
                     q_diff = q_diff * self._addb_q_confidence
                 q_match_loss = w_q * ramp * (q_diff ** 2).mean()
 
-        # 8c. Chirality loss (Method A): penalize L/R swap
-        # cross(hip_R - pelvis, hip_L - pelvis) should point UP (+Y)
-        # If body is 180° flipped, cross product points DOWN → large penalty
-        chirality_loss = torch.tensor(0.0, device=self.device)
-        w_chiral = getattr(self.config, 'weight_chirality', 0.0)
-        if w_chiral > 0:
-            # SKEL joint indices: pelvis=0, femur_r=1, femur_l=6
-            pelvis = skel_joints[:, 0, :]     # [T, 3]
-            hip_r = skel_joints[:, 1, :]      # [T, 3]
-            hip_l = skel_joints[:, 6, :]      # [T, 3]
-            v_r = hip_r - pelvis              # [T, 3]
-            v_l = hip_l - pelvis              # [T, 3]
-            cross = torch.cross(v_r, v_l, dim=-1)  # [T, 3]
-            # GT: same computation on target joints
-            gt_pelvis = addb_joints[:, 0, :]
-            gt_hip_r = addb_joints[:, 1, :]
-            gt_hip_l = addb_joints[:, 6, :]
-            gt_vr = gt_hip_r - gt_pelvis
-            gt_vl = gt_hip_l - gt_pelvis
-            gt_cross = torch.cross(gt_vr, gt_vl, dim=-1)
-            # Penalize if cross product Y-component has different sign from GT
-            # Use dot product: should be positive (same direction)
-            dot_y = cross[:, 1] * gt_cross[:, 1]  # [T]
-            # ReLU(-dot_y): penalty only when sign differs
-            chirality_loss = w_chiral * torch.relu(-dot_y).mean()
-
-        # 9. Betas regularization (only in Stage 2)
+        # 10. Betas regularization (Stage 2b only)
         betas_reg = torch.tensor(0.0, device=self.device)
         if include_betas_reg and betas is not None:
             betas_reg = 0.005 * (betas ** 2).mean()
 
-        # 10. Scapulohumeral coupling constraint (Phase 3)
-        scapulohumeral_loss = torch.tensor(0.0, device=self.device)
-        if self.config.use_scapulohumeral_coupling:
-            scapulohumeral_loss = (
-                self.config.scapulohumeral_weight *
-                self._compute_scapulohumeral_coupling_loss(poses)
-            )
-
-        # 11. Marker position loss (with warm-up schedule + bony/soft weighting)
+        # 11. Marker position loss (BSM vertex matching, T1+T2, with warmup)
         marker_loss = torch.tensor(0.0, device=self.device)
         if (include_marker_loss
                 and self.marker_handler is not None
                 and self.config.use_marker_loss):
-            # Warm-up schedule: 0→warmup_fraction = joints only,
-            # warmup_fraction→1.0 = linear ramp to full marker weight
             marker_weight = self.config.weight_marker
             warmup_frac = self.config.marker_warmup_fraction
             if iteration >= 0 and total_iters > 0:
                 progress = iteration / total_iters
                 if progress < warmup_frac:
-                    marker_weight = 0.0  # Pure joint optimization
+                    marker_weight = 0.0
                 else:
-                    # Linear ramp from 0 to full weight
                     ramp = (progress - warmup_frac) / (1.0 - warmup_frac)
                     marker_weight = self.config.weight_marker * ramp
 
             if marker_weight > 0:
-                tier_wf = getattr(self.config, 'tier_weight_factors', None)
-                use_adaptive = getattr(self.config, 'use_adaptive_marker_weight', False)
-                adaptive_thr = getattr(self.config, 'adaptive_weight_threshold_mm', 50.0)
-
-                # Bony/soft marker weighting (P2b)
                 bony_soft_w = None
                 if self.config.use_bony_soft_weighting:
                     bony_soft_w = {
@@ -2031,54 +1939,28 @@ class PoseOptimizer:
                         'soft': self.config.soft_marker_weight,
                         'head_boost': getattr(self.config, 'head_marker_weight_boost', 1.0),
                     }
-
                 marker_loss = marker_weight * self.marker_handler.compute_marker_loss(
                     skel_joints, skel_verts,
-                    tier_weight_factors=tier_wf,
-                    use_adaptive_weight=use_adaptive,
-                    adaptive_threshold_mm=adaptive_thr,
+                    tier_weight_factors=self.config.tier_weight_factors,
                     bony_soft_weights=bony_soft_w,
-                    upper_body_marker_boost=getattr(self.config, 'upper_body_marker_boost', 1.0),
-                    head_marker_boost=getattr(self.config, 'head_marker_boost', 1.0),
-                )
-
-        # 12. Marker-pair direction loss (P2a)
-        marker_dir_loss = torch.tensor(0.0, device=self.device)
-        w_marker_dir = self.config.weight_marker_direction
-        # In Phase A, use phaseA weight override
-        if phase == 'A':
-            w_marker_dir = self.config.phaseA_weight_marker_direction
-        if w_marker_dir > 0 and self.marker_handler is not None and skel_verts is not None:
-            if hasattr(self.marker_handler, 'compute_marker_direction_loss'):
-                marker_dir_loss = w_marker_dir * self.marker_handler.compute_marker_direction_loss(
-                    skel_verts,
-                    bony_only=(phase == 'A' and self.config.phaseA_bony_only),
+                    upper_body_marker_boost=self.config.upper_body_marker_boost,
+                    head_marker_boost=self.config.head_marker_boost,
                 )
 
         # Combine losses
         loss = (
             self.config.weight_joint * joint_loss +
-            self.config.weight_bone_dir * bone_dir_loss +
             self.config.weight_bone_len * bone_len_loss +
             self.config.weight_width * width_loss +
-            shoulder_losses['acromial'] +
-            shoulder_losses['humerus_align'] +
-            shoulder_losses['humerus_on_line'] +
             shoulder_losses['scapula_reg'] +
             shoulder_losses['humerus_reg'] +
             pose_reg +
             spine_reg +
-            arm_reg +
-            foot_reg +
             foot_height_loss +
             temporal_loss +
-            cartesian_smooth_loss +
             q_match_loss +
-            chirality_loss +
             betas_reg +
-            scapulohumeral_loss +
-            marker_loss +
-            marker_dir_loss
+            marker_loss
         )
 
         return loss

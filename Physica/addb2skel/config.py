@@ -146,30 +146,43 @@ class OptimizationConfig:
     pose_lr: float = 0.01
     pose_iters: int = 500
 
-    # Loss weights (tuned based on compare_smpl_skel.py)
-    weight_joint: float = 1.0
-    weight_bone_dir: float = 0.0    # DISABLED — PROXY joints (acromial) in bone pairs cause issues
-    weight_bone_len: float = 1.0    # 0.3 → 1.0 (critical!)
-    weight_shoulder: float = 0.0    # DISABLED — acromial is PROXY, position matching causes scapula distortion
-    weight_width: float = 2.0       # L/R acromial distance — low weight to prevent narrow shoulders without over-abducting scapula
-    weight_pose_reg: float = 0.01   # Keep original — increasing degrades MPJPE significantly
-    weight_spine_reg: float = 0.3   # 0.1 → 0.3 (prevents thorax over-extension when spine markers absent)
-    weight_arm_reg: float = 0.0     # Arm DOFs (elbow/wrist) regularization — disabled by default
-    weight_scapula_reg: float = 0.05  # Scapula DOF regularization (anatomical prior, keeps shoulder neutral)
-    weight_temporal: float = 0.01   # Keep original — increasing degrades MPJPE significantly
-    weight_acceleration: float = 0.1  # 2nd-order (acceleration) smoothness regularization
-    adaptive_temporal: bool = False   # If True, normalize temporal loss by dt (dt-adaptive smoothing)
-    dt: float = 0.01                  # Timestep in seconds (used when adaptive_temporal=True)
-    weight_cartesian_temporal: float = 0.0    # Cartesian joint velocity smoothness (0=disabled)
-    weight_cartesian_acceleration: float = 0.0  # Cartesian joint acceleration smoothness (0=disabled)
-    weight_q_match: float = 0.1            # DOF-space q matching vs AddB GT (prevents Euler wrapping)
-    q_match_warmup_fraction: float = 0.3   # Warmup: Cartesian 수렴 후 q-match 시작 (0.3=30%)
-    q_match_confidence_weighted: bool = True  # |scale|로 DOF별 가중치 (낮은 scale = 낮은 신뢰)
+    # =========================================================================
+    # Loss weights (Fix K, 2026-04-02)
+    # Total: 13 active loss terms. See pipeline_spec.pdf for full documentation.
+    # =========================================================================
+    weight_joint: float = 1.0          # 15 DIRECT joints, weighted Huber (δ=0.05)
+    weight_bone_len: float = 1.0       # 12 bone pair lengths, MSE
+    weight_width: float = 2.0          # L/R scapula distance (shoulder width)
+    weight_pose_reg: float = 0.01      # All 46 DOFs → 0
+    weight_spine_reg: float = 0.3      # Spine 6 DOFs → 0 (thorax over-extension prevention)
+    weight_scapula_reg: float = 0.05   # Scapula DOFs → 0 (shoulder neutral)
+    weight_humerus_reg: float = 0.05   # Humerus DOFs → 0 (arm neutral)
+    weight_foot_height: float = 15.0   # Foot Y-axis matching (GRF critical)
+    weight_temporal: float = 0.01      # DOF velocity smoothness
+    weight_acceleration: float = 0.1   # DOF acceleration smoothness
+    weight_q_match: float = 0.1        # DOF matching to q_reference (warmup 30%)
+    weight_marker: float = 10.0        # BSM vertex marker matching (T1+T2 only)
+    # Betas regularization: hardcoded 0.005 in _compute_optimization_loss (Stage 2b only)
 
-    # --- Direction correction methods (mutually exclusive) ---
-    # Method A: Chirality loss — penalizes L/R swap via cross product constraint
-    weight_chirality: float = 0.0      # 0=disabled. Recommended: 5.0-10.0
-    # Method B: GT-based R_align — compute R_align from GT joint positions instead of pelvis FK
+    q_match_warmup_fraction: float = 0.3   # Cartesian 수렴 후 q-match 시작
+    q_match_confidence_weighted: bool = True
+    adaptive_temporal: bool = False     # If True, normalize temporal loss by dt
+    dt: float = 0.01                    # Timestep (overridden by HPCC from fps)
+
+    # --- Deprecated loss weights (kept for backward compatibility, all disabled) ---
+    weight_bone_dir: float = 0.0       # PROXY joints in bone pairs
+    weight_shoulder: float = 0.0       # Acromial position (PROXY)
+    weight_humerus_align: float = 0.0  # Humerus has no DIRECT mapping
+    weight_arm_reg: float = 0.0        # Arm DOF regularization
+    weight_foot_reg: float = 0.0       # Foot DOF regularization
+    weight_chirality: float = 0.0      # L/R flip penalty
+    weight_cartesian_temporal: float = 0.0
+    weight_cartesian_acceleration: float = 0.0
+    weight_marker_direction: float = 0.0
+    use_scapulohumeral_coupling: bool = False
+    scapulohumeral_weight: float = 0.0
+
+    # --- Direction correction ---
     use_gt_align: bool = False
     # Method C: Two-pass — try 0° and 180° pelvis rotation, pick lower MPJPE
     use_two_pass: bool = True             # Two-pass direction correction (0°/180° pelvis probe)
