@@ -367,30 +367,39 @@ def compute_shoulder_losses(
     Returns:
         Dictionary of loss components.
     """
+    _zero = torch.tensor(0.0, device=skel_joints.device)
     losses = {}
 
-    # Virtual acromial loss
-    losses['acromial'] = config.weight_shoulder * scapula_handler.compute_acromial_loss(
-        skel_vertices, addb_joints
-    )
+    # Virtual acromial loss (skip when weight=0)
+    if config.weight_shoulder > 0:
+        losses['acromial'] = config.weight_shoulder * scapula_handler.compute_acromial_loss(
+            skel_vertices, addb_joints)
+    else:
+        losses['acromial'] = _zero
 
-    # Humerus alignment loss (direction matching)
-    losses['humerus_align'] = getattr(config, 'weight_humerus_align', 0.5) * scapula_handler.compute_humerus_alignment_loss(
-        skel_joints, addb_joints
-    )
+    # Humerus alignment loss (skip when weight=0)
+    w_ha = getattr(config, 'weight_humerus_align', 0.0)
+    if w_ha > 0:
+        losses['humerus_align'] = w_ha * scapula_handler.compute_humerus_alignment_loss(
+            skel_joints, addb_joints)
+    else:
+        losses['humerus_align'] = _zero
 
-    # Humerus alignment with arm direction (perpendicular deviation penalty)
-    # DISABLED during optimization - use post-processing instead for better MPJPE
-    losses['humerus_on_line'] = torch.tensor(0.0, device=skel_joints.device)
+    losses['humerus_on_line'] = _zero  # permanently disabled
 
-    # Scapula regularization
-    losses['scapula_reg'] = config.weight_scapula_reg * scapula_handler.compute_scapula_regularization(
-        skel_poses
-    )
+    # Scapula regularization (skip when weight=0)
+    if config.weight_scapula_reg > 0:
+        losses['scapula_reg'] = config.weight_scapula_reg * scapula_handler.compute_scapula_regularization(
+            skel_poses)
+    else:
+        losses['scapula_reg'] = _zero
 
-    # Humerus regularization
-    losses['humerus_reg'] = getattr(config, 'weight_humerus_reg', 0.05) * scapula_handler.compute_humerus_regularization(
-        skel_poses
-    )
+    # Humerus regularization (skip when weight=0)
+    w_hr = getattr(config, 'weight_humerus_reg', 0.0)
+    if w_hr > 0:
+        losses['humerus_reg'] = w_hr * scapula_handler.compute_humerus_regularization(
+            skel_poses)
+    else:
+        losses['humerus_reg'] = _zero
 
     return losses

@@ -150,7 +150,7 @@ class OptimizationConfig:
     weight_joint: float = 1.0
     weight_bone_dir: float = 0.0    # DISABLED — PROXY joints (acromial) in bone pairs cause issues
     weight_bone_len: float = 1.0    # 0.3 → 1.0 (critical!)
-    weight_shoulder: float = 1.0
+    weight_shoulder: float = 0.0    # DISABLED — acromial is PROXY, position matching causes scapula distortion
     weight_width: float = 2.0       # L/R acromial distance — low weight to prevent narrow shoulders without over-abducting scapula
     weight_pose_reg: float = 0.01   # Keep original — increasing degrades MPJPE significantly
     weight_spine_reg: float = 0.3   # 0.1 → 0.3 (prevents thorax over-extension when spine markers absent)

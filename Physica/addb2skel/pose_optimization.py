@@ -1869,9 +1869,11 @@ class PoseOptimizer:
         bone_len_diff_sq = (pred_bone_lengths - target_bone_lengths) ** 2  # [T, num_bones]
         bone_len_loss = (self.bone_weights.unsqueeze(0) * bone_len_diff_sq).mean()
 
-        # 4. Shoulder width loss
-        pred_width = self.skel.get_shoulder_width(skel_joints)
-        width_loss = F.mse_loss(pred_width, target_width)
+        # 4. Shoulder width loss (skip when weight=0)
+        width_loss = torch.tensor(0.0, device=self.device)
+        if self.config.weight_width > 0:
+            pred_width = self.skel.get_shoulder_width(skel_joints)
+            width_loss = F.mse_loss(pred_width, target_width)
 
         # 5. Shoulder/scapula losses
         shoulder_losses = compute_shoulder_losses(
@@ -1886,9 +1888,11 @@ class PoseOptimizer:
         spine_dofs = poses[:, SPINE_DOF_INDICES]
         spine_reg = self.config.weight_spine_reg * (spine_dofs ** 2).mean()
 
-        # 7a. Arm regularization (elbow/wrist — prevents over-flexion)
-        arm_dofs = poses[:, ARM_DOF_INDICES]
-        arm_reg = self.config.weight_arm_reg * (arm_dofs ** 2).mean()
+        # 7a. Arm regularization (skip when weight=0)
+        arm_reg = torch.tensor(0.0, device=self.device)
+        if self.config.weight_arm_reg > 0:
+            arm_dofs = poses[:, ARM_DOF_INDICES]
+            arm_reg = self.config.weight_arm_reg * (arm_dofs ** 2).mean()
 
         # 7b. Foot DOF regularization (subtalar + mtp → keep close to init/0)
         # AddB subtalar/mtp are typically 0; SKEL subtalar/mtp should not drift freely
