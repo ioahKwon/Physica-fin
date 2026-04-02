@@ -145,17 +145,17 @@ def print_summary(results, clear=True):
                       f"{m.get('status', '?')[:80]}")
         return
 
-    # Aggregate metrics (current format: flat keys in metrics.json)
-    mpjpe_vals = [m['mpjpe_mm'] for m in results['success'] if m.get('mpjpe_mm') is not None]
-
+    # Aggregate all metrics
     eval_keys = [
-        ('mpjpe_mm', 'MPJPE', 'mm'),
-        ('pa_mpjpe_mm', 'PA-MPJPE', 'mm'),
-        ('accel_error', 'Accel Error', 'mm/f²'),
-        ('vel_error', 'Vel Error', 'mm/f'),
-        ('foot_sliding_mm', 'Foot Sliding', 'mm'),
+        ('mpjpe_mm',              'W-MPJPE',            'mm'),
+        ('w_mpjpe_mm',            'W-MPJPE (eval)',     'mm'),
+        ('pa_mpjpe_mm',           'PA-MPJPE',           'mm'),
+        ('accel_error',           'Accel Error',        'mm/f²'),
+        ('vel_error',             'Vel Error',          'mm/f'),
+        ('foot_sliding_mm',       'Foot Sliding',       'mm'),
         ('ground_penetration_mm', 'Ground Penetration', 'mm'),
-        ('marker_mpjpe_mm', 'Marker MPJPE', 'mm'),
+        ('marker_mpjpe_mm',       'Marker MPJPE',       'mm'),
+        ('pelvis_std_deg',        'Pelvis Std',         '°'),
     ]
     eval_data = defaultdict(list)
     for m in results['success']:
@@ -175,35 +175,39 @@ def print_summary(results, clear=True):
 
     # Timing
     times = [m.get('timing', {}).get('convert_s', 0) for m in results['success'] if m.get('timing')]
-    total_frames = sum(m.get('num_frames', 0) for m in results['success'])
 
-    # Print metrics table
-    print("-" * 80)
-    print(f"  {'Metric':<30} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10} {'Unit':>10}")
-    print("-" * 80)
+    # ---- Evaluation Metrics Table ----
+    print("-" * 90)
+    print(f"  {'Metric':<25} {'Mean':>8} {'Median':>8} {'Std':>8} {'P25':>8} {'P75':>8} {'P95':>8} {'Min':>8} {'Max':>8} {'Unit':>6}")
+    print("-" * 90)
 
     for key, label, unit in eval_keys:
         if label in eval_data and len(eval_data[label]) > 0:
             a = np.array(eval_data[label])
-            print(f"  {label:<30} {a.mean():>10.2f} {a.std():>10.2f} {a.min():>10.2f} {a.max():>10.2f} {unit:>10}")
+            print(f"  {label:<25} {a.mean():>8.2f} {np.median(a):>8.2f} {a.std():>8.2f} "
+                  f"{np.percentile(a,25):>8.2f} {np.percentile(a,75):>8.2f} {np.percentile(a,95):>8.2f} "
+                  f"{a.min():>8.2f} {a.max():>8.2f} {unit:>6}")
 
     # Marker matching stats
     mk_t1 = [m.get('marker_t1', 0) for m in results['success']]
     mk_t2 = [m.get('marker_t2', 0) for m in results['success']]
+    mk_matched = [m.get('marker_matched', 0) for m in results['success']]
     if mk_t1:
-        print(f"  {'Markers T1 (mean)':<30} {np.mean(mk_t1):>10.1f}")
-        print(f"  {'Markers T2 (mean)':<30} {np.mean(mk_t2):>10.1f}")
+        print(f"  {'Markers T1 (mean)':<25} {np.mean(mk_t1):>8.1f}")
+        print(f"  {'Markers T2 (mean)':<25} {np.mean(mk_t2):>8.1f}")
+        print(f"  {'Markers Total (mean)':<25} {np.mean(mk_matched):>8.1f}")
 
-    print("-" * 80)
+    print("-" * 90)
     print()
 
-    # Timing
+    # ---- Timing ----
     if times:
         t = np.array(times)
+        total_frames_done = sum(m.get('num_frames', 0) for m in results['success'])
+        fps = total_frames_done / t.sum() if t.sum() > 0 else 0
+        gpu_hours = t.sum() / 3600
         print(f"  Timing: {t.mean():.0f}s avg, {t.min():.0f}s min, {t.max():.0f}s max per trial")
-        print(f"  Total frames processed: {total_frames:,}")
-        fps = total_frames / t.sum() if t.sum() > 0 else 0
-        print(f"  Throughput: {fps:.1f} frames/sec (across all trials)")
+        print(f"  Throughput: {fps:.1f} frames/sec  |  GPU-hours used: {gpu_hours:.1f}h")
     print()
 
     # Per-joint error table
