@@ -126,10 +126,13 @@ def print_summary(results, clear=True):
     print()
 
     # Summary counts
-    print(f"  Total processed:  {n_total:>6}")
-    print(f"    ✓ Success:      {n_success:>6}")
-    print(f"    ○ Child skip:   {n_skip:>6}")
-    print(f"    ✗ Errors:       {n_err:>6}")
+    total_frames = sum(m.get('num_frames', 0) for m in results['success'])
+    total_frames_expected = int(TOTAL_WITH_ARM * (total_frames / n_success)) if n_success > 0 else 0
+    remaining_trials = TOTAL_WITH_ARM - n_total
+    remaining_frames = total_frames_expected - total_frames if total_frames_expected > 0 else 0
+
+    print(f"  Trials:    {n_success:>6,} success / {n_skip:>4,} child-skip / {n_err:>4,} error  =  {n_total:,} done, {remaining_trials:,} remaining")
+    print(f"  Frames:    {total_frames:>12,} processed  /  ~{total_frames_expected:>12,} total  ({remaining_frames:,} remaining)")
     print()
 
     if n_success == 0:
