@@ -2451,9 +2451,7 @@ def finetune_with_markers(
 
         if verbose:
             with torch.no_grad():
-                pred = skel_joints[:, optimizer_obj.skel_indices, :]
-                tgt = addb_joints_t[:, optimizer_obj.addb_indices, :]
-                mpjpe = torch.norm(pred - tgt, dim=-1).mean().item() * 1000
+                mpjpe = optimizer_obj._compute_mpjpe(skel_joints, addb_joints_t)
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 'mpjpe': f'{mpjpe:.1f}mm'})
 
     # Final stats
@@ -2778,8 +2776,9 @@ def finetune_foot(
         mpjpe = optimizer_obj._compute_mpjpe(skel_joints, addb_joints_t)
         per_joint_error = optimizer_obj._compute_per_joint_error(skel_joints, addb_joints_t)
 
-        # Foot-specific metrics
-        pred_foot = skel_joints[:, SKEL_FOOT_JOINTS, :]
+        # Foot-specific metrics (W-MPJPE: root-aligned)
+        offset = (addb_joints_t[:, 0:1, :] - skel_joints[:, 0:1, :])  # pelvis alignment
+        pred_foot = skel_joints[:, SKEL_FOOT_JOINTS, :] + offset
         target_foot = addb_joints_t[:, ADDB_FOOT_JOINTS, :]
         foot_mpjpe = torch.norm(pred_foot - target_foot, dim=-1).mean().item() * 1000
 
