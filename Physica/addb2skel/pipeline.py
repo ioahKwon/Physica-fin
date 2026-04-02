@@ -542,6 +542,7 @@ def convert_addb_to_skel(
             addb_joints_converted, betas, poses, trans,
             skel, config, verbose=verbose,
             marker_observations=marker_observations,
+            dJ=dJ,
         )
         if verbose:
             print(f"  Stage 2e MPJPE: {foot_stats.get('mpjpe_mm', 0):.1f}mm, "

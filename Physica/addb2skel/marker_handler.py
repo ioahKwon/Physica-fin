@@ -544,7 +544,7 @@ _BSM_REGION: Dict[str, str] = {
     # Pelvis
     'LFWT': 'pelvis', 'RFWT': 'pelvis', 'LBWT': 'pelvis', 'RBWT': 'pelvis',
     'SACR': 'pelvis', 'LPSI': 'pelvis', 'RPSI': 'pelvis',
-    'LUMB': 'pelvis',  # LUMB is anatomically lumbar, near pelvis
+    # NOTE: 'LUMB' already mapped to 'spine' above (line 541). Duplicate key removed.
     # Shoulder / Upper arm
     'LSHO': 'shoulder', 'RSHO': 'shoulder',
     'LSCA': 'shoulder', 'RSCA': 'shoulder',

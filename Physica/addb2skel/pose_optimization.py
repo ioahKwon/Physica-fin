@@ -977,7 +977,7 @@ class PoseOptimizer:
 
             # Forward through SKEL
             skel_verts, skel_joints, _ = self.skel.forward(
-                betas.unsqueeze(0), poses, trans, return_skeleton=False
+                betas.unsqueeze(0), poses, trans, dJ=self._dJ, return_skeleton=False
             )
 
             # --- Loss computation ---
@@ -1858,9 +1858,11 @@ class PoseOptimizer:
         target_joints = addb_joints[:, self.addb_indices, :]
         joint_loss = self._compute_weighted_joint_loss(pred_joints_mapped, target_joints)
 
-        # 2. Bone direction loss
-        pred_bone_dirs = compute_bone_directions(skel_joints, self.skel_bone_indices)
-        bone_dir_loss = cosine_similarity_loss(pred_bone_dirs, target_bone_dirs)
+        # 2. Bone direction loss (skip computation when weight=0)
+        bone_dir_loss = torch.tensor(0.0, device=self.device)
+        if self.config.weight_bone_dir > 0:
+            pred_bone_dirs = compute_bone_directions(skel_joints, self.skel_bone_indices)
+            bone_dir_loss = cosine_similarity_loss(pred_bone_dirs, target_bone_dirs)
 
         # 3. Bone length loss (weighted per-bone: shin priority)
         pred_bone_lengths = compute_bone_lengths(skel_joints, self.skel_bone_indices)
@@ -2588,6 +2590,7 @@ def finetune_foot(
     config: OptimizationConfig,
     verbose: bool = False,
     marker_observations: Optional[List[Dict[str, np.ndarray]]] = None,
+    dJ: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
     """
     Ultra-aggressive lower-body fine-tune: pelvis + hip + knee + foot DOFs + translation.
@@ -2756,7 +2759,7 @@ def finetune_foot(
         poses_cur[:, LOWER_DOF_INDICES] = lower_dofs
 
         skel_verts, skel_joints, _ = skel_interface.forward(
-            betas.unsqueeze(0).expand(T, -1), poses_cur, trans
+            betas.unsqueeze(0).expand(T, -1), poses_cur, trans, dJ=dJ
         )
 
         # Loss 1: Lower-body joint position loss (3D)
@@ -2855,7 +2858,7 @@ def finetune_foot(
     if has_foot_markers:
         with torch.no_grad():
             v_final, _, _ = skel_interface.forward(
-                betas.unsqueeze(0).expand(T, -1), final_poses, best_trans
+                betas.unsqueeze(0).expand(T, -1), final_poses, best_trans, dJ=dJ
             )
             pred_fm = v_final[:, foot_marker_vidx_t, :]  # [T, K, 3]
             # Mean offset over all frames: GT - pred (in SKEL coords)
@@ -2870,7 +2873,7 @@ def finetune_foot(
     # Final statistics
     with torch.no_grad():
         skel_verts_final, skel_joints, _ = skel_interface.forward(
-            betas.unsqueeze(0).expand(T, -1), final_poses, best_trans
+            betas.unsqueeze(0).expand(T, -1), final_poses, best_trans, dJ=dJ
         )
         optimizer_obj = PoseOptimizer(skel_interface, config)
         mpjpe = optimizer_obj._compute_mpjpe(skel_joints, addb_joints_t)
