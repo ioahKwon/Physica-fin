@@ -562,12 +562,16 @@ def convert_addb_to_skel(
             trans = best_trans.clone()
             betas = best_betas.clone()
 
-        # Update pose_stats with foot results (use best_mpjpe if rollback occurred)
-        pose_stats.update({
-            'mpjpe_mm': best_mpjpe,
-            'per_joint_error_mm': foot_stats.get('per_joint_error_mm'),
-            'scapula_dofs': foot_stats.get('scapula_dofs'),
-        })
+        # Update pose_stats only if foot fine-tune was NOT rolled back
+        if best_stage == 'Stage 2e':
+            pose_stats.update({
+                'mpjpe_mm': best_mpjpe,
+                'per_joint_error_mm': foot_stats.get('per_joint_error_mm'),
+                'scapula_dofs': foot_stats.get('scapula_dofs'),
+            })
+        else:
+            # Rolled back — keep Stage 2 per_joint_error, just update mpjpe
+            pose_stats['mpjpe_mm'] = best_mpjpe
 
     # Extract foot marker offsets (computed in finetune_foot Phase 2)
     foot_marker_offsets = None
