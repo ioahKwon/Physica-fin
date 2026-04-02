@@ -290,19 +290,8 @@ def main():
 
     sex = metadata.get('sex', 'auto')
 
-    # Config: use current defaults (Fix K, 2026-04-02)
-    # All settings are in config.py defaults:
-    #   - Phase A OFF (use_direction_first=False already set in defaults... NO)
-    # Actually config.py defaults still have use_direction_first=True
-    # We need to override the key Fix K settings:
+    # Config: Fix K defaults (2026-04-02) — all settings in config.py defaults
     config = OptimizationConfig(device=args.device)
-    if args.skel_model_path:
-        config.skel_model_path = args.skel_model_path
-
-    # Fix K settings (2026-04-02)
-    config.use_direction_first = False           # Phase A OFF
-    config.use_adaptive_pelvis_limit = True      # Adaptive pelvis ±90°
-    config.adaptive_pelvis_margin_rad = 1.571    # ±90°
 
     # dt from trial metadata (for temporal smoothness normalization)
     config.dt = 1.0 / metadata['fps']

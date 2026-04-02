@@ -315,8 +315,10 @@ def compute_addb_to_skel_rotation(addb_skel, addb_poses_arr) -> np.ndarray:
 
     return R_align
 
-# SKEL kinematic tree parents
-_SKEL_PARENTS = [-1, 0, 1, 2, 3, 4, 0, 6, 7, 8, 9, 0, 11, 12, 11, 14, 15, 16, 17, 11, 19, 20, 21, 22]
+# SKEL kinematic tree parents (from skel_interface.py line 92)
+# pelvis(0)→-1, femur_r(1)→0, ..., thorax(12)→11, head(13)→12,
+# scapula_r(14)→12(thorax), humerus_r(15)→14, ..., scapula_l(19)→12(thorax), ...
+_SKEL_PARENTS = [-1, 0, 1, 2, 3, 4, 0, 6, 7, 8, 9, 0, 11, 12, 12, 14, 15, 16, 17, 12, 19, 20, 21, 22]
 
 # AddB body → SKEL joint mapping (for rotation matrix extraction)
 # AddB has 20 body nodes, SKEL has 24 joints.

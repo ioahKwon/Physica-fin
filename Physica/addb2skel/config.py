@@ -188,8 +188,8 @@ class OptimizationConfig:
     use_tight_dof_limits: bool = False     # Fix D: tighten DOF limits around q_reference ± margin
     tight_dof_margin_rad: float = 0.5      # Margin in radians (~29°) around q_ref for tight limits
     pelvis_rotation_unlimited: bool = False # Fix F: remove pelvis_rotation limit (SKEL original has no limit)
-    use_adaptive_pelvis_limit: bool = False # Fix H: set pelvis_rot limit to q_ref_median ± margin
-    adaptive_pelvis_margin_rad: float = 0.785  # ±45° default
+    use_adaptive_pelvis_limit: bool = True  # Fix K: constrain pelvis_rot to q_ref median ± margin
+    adaptive_pelvis_margin_rad: float = 1.571  # ±90° (Fix K default)
     auto_adaptive_pelvis: bool = False  # Auto-detect: apply adaptive only when q_ref pelvis_rot is outside ±45°
     weight_foot_reg: float = 0.0    # Subtalar/mtp DOF regularization (0=disabled; >0 degrades foot direction)
     weight_foot_height: float = 15.0  # Foot height (Y-axis) loss — GRF critical: aggressive foot fitting
@@ -320,19 +320,15 @@ class OptimizationConfig:
     # These markers were excluded based on empirical error analysis, but some may be
     # recoverable with better vertex mapping or fitting. Needs re-evaluation.
     marker_blacklist: List[str] = field(default_factory=lambda: [
-        'LFHD', 'RFHD', 'LBHD', 'RBHD',              # head markers — limited by neck joint 3-DOF control
-        'LLATFOOT', 'RLATFOOT', 'LANKMED', 'RANKMED',  # badly aliased foot markers (wrong vertex)
-        'T10', 'RBAK', 'STRN',                         # thorax/back — needs re-evaluation (T10 added to yaml)
-        'LPSIS', 'RPSIS', 'LASIS', 'RASIS',            # pelvis surface markers — skin vs bone prominence offset
-        'LPSI', 'RPSI',                                # posterior iliac spine — needs re-evaluation (added to yaml)
-        'LTOE', 'RTOE',                                # toe tip vertex — mismatch when GT LTOE is actually MTP not tip
-        # C7/CV7 removed from blacklist (2026-02-27): ablation shows ~42mm error, MPJPE unaffected.
-        # See 03_Output/addb2skel/20260226/20260226_blacklist_ablation/
-        'SACR',                                        # sacrum — needs re-evaluation (added to yaml)
-        # Force plate / calibration markers (not body markers)
-        'FL', 'FR', 'BL', 'BR',                       # force plate corners (Carter2023 etc.)
-        'LPT', 'RPT',                                 # force plate markers (Y~0.07m, near ground)
-        'FP1', 'FP2', 'FP3', 'FP4',                   # force plate numbered markers
+        # Head markers: SKEL head has only 3 DOFs, insufficient to match 4 head markers
+        'LFHD', 'RFHD', 'LBHD', 'RBHD',
+        # Force plate / calibration markers (NOT body markers)
+        'FL', 'FR', 'BL', 'BR',                       # force plate corners (Carter2023)
+        'LPT', 'RPT',                                 # force plate markers
+        'FP1', 'FP2', 'FP3', 'FP4',                   # force plate numbered
+        # NOTE: LTOE/RTOE removed from blacklist — handled by T1_REDIRECT_TABLE (→LTOS/RTOS)
+        # NOTE: LANKMED/RANKMED removed — now correctly aliased to LAKI/RAKI
+        # NOTE: Pelvis/spine markers (SACR, LPSI, T10 etc.) removed — all valid BSM markers
     ])
 
     # ==========================================================================
@@ -385,7 +381,7 @@ class OptimizationConfig:
     # Phase A: 방향 수렴 (DOF 제한 없음) → Phase B: DOF 제한 적용
     # 기존 Stage 1 (250 iters) = Phase A (100) + Phase B (150)
 
-    use_direction_first: bool = True
+    use_direction_first: bool = False     # Fix K: Phase A OFF (caused pelvis rotation escape)
     phaseA_iters: int = 100           # Phase A: 방향 수렴 (DOF 제한 없음)
     phaseA_lr: float = 0.025
     phaseA_weight_bone_dir: float = 1.5   # ↑ (기본 0.3)
