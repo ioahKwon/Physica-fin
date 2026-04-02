@@ -270,11 +270,8 @@ class OptimizationConfig:
     multi_res_key_joints: List[int] = None  # Will be set to default in __post_init__
     multi_res_stage1_iters: int = 100  # Iterations for key joints only
 
-    # Scapula-Humerus Coupling Constraint (scapulohumeral rhythm)
-    # Anatomically, scapula rotates ~1/3 of humerus elevation (2:1 ratio)
-    use_scapulohumeral_coupling: bool = False  # Disabled by default
-    scapulohumeral_weight: float = 0.1  # Weight for coupling constraint
-    scapulohumeral_ratio: float = 3.0  # humerus_elevation / scapula_upward_rot ratio
+    # Scapulohumeral coupling (deprecated, defined in deprecated section above)
+    scapulohumeral_ratio: float = 3.0
 
     # ==========================================================================
     # Marker-Based Loss (Phase 3)
