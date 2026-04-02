@@ -1992,6 +1992,10 @@ class PoseOptimizer:
         pred = skel_joints[:, self.skel_indices, :]
         target = addb_joints[:, self.addb_indices, :]
 
+        # W-MPJPE: per-frame root alignment (pelvis = index 0)
+        offset = (target[:, 0:1, :] - pred[:, 0:1, :])  # [T, 1, 3]
+        pred = pred + offset
+
         if exclude_acromial:
             exclude_indices = []
             for i, addb_idx in enumerate(self.addb_indices):
@@ -2015,18 +2019,23 @@ class PoseOptimizer:
         skel_joints: torch.Tensor,
         addb_joints: torch.Tensor,
     ) -> Dict[str, float]:
-        """Compute root-relative per-joint error in mm."""
+        """Compute W-MPJPE style per-joint error in mm.
+
+        Per-frame root alignment: shift pred so pred_pelvis = gt_pelvis,
+        then compute per-joint L2 error. Equivalent to root-relative MPJPE.
+        """
         from .joint_definitions import ADDB_JOINTS
 
-        # Root-relative: subtract pelvis (index 0 in both mapped lists)
-        pred_root = skel_joints[:, self.skel_indices[0]:self.skel_indices[0]+1, :]
-        target_root = addb_joints[:, self.addb_indices[0]:self.addb_indices[0]+1, :]
+        # Per-frame root alignment (W-MPJPE style)
+        pred_root = skel_joints[:, self.skel_indices[0], :]   # [T, 3] pelvis
+        target_root = addb_joints[:, self.addb_indices[0], :] # [T, 3] pelvis
+        offset = (target_root - pred_root).unsqueeze(1)        # [T, 1, 3]
 
         errors = {}
         for i, (addb_idx, skel_idx) in enumerate(zip(self.addb_indices, self.skel_indices)):
-            pred = skel_joints[:, skel_idx, :] - pred_root.squeeze(1)
-            target = addb_joints[:, addb_idx, :] - target_root.squeeze(1)
-            error = torch.norm(pred - target, dim=-1).mean().item() * 1000
+            pred_aligned = skel_joints[:, skel_idx, :] + offset.squeeze(1)
+            target = addb_joints[:, addb_idx, :]
+            error = torch.norm(pred_aligned - target, dim=-1).mean().item() * 1000
             errors[ADDB_JOINTS[addb_idx]] = error
 
         return errors
