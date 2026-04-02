@@ -127,6 +127,11 @@ class ScaleEstimator:
         poses = torch.zeros(1, SKEL_NUM_POSE_DOF, device=self.device)
         trans = torch.zeros(1, 3, device=self.device)
 
+        # Target shoulder width from AddB acromial (acromial_r=12, acromial_l=16)
+        target_shoulder_width = torch.norm(
+            addb_joints_t[:, 12, :] - addb_joints_t[:, 16, :], dim=-1
+        ).mean()  # scalar, meters
+
         best_loss = float('inf')
         best_betas = betas.clone()
         best_dJ = dJ.clone().detach()
@@ -167,6 +172,14 @@ class ScaleEstimator:
             # Bone length loss (weighted per-bone)
             length_loss = (bone_weights * (skel_lengths - target_lengths) ** 2).mean()
 
+            # Shoulder width loss: match SKEL scapula width to AddB acromial width
+            # scapula_r=14, scapula_l=19 in SKEL; acromial_r=12, acromial_l=16 in AddB
+            shoulder_width_loss = torch.tensor(0.0, device=self.device)
+            w_sw = getattr(self.config, 'weight_shoulder_width_in_scale', 1.0)
+            if w_sw > 0:
+                skel_shoulder_w = torch.norm(skel_joints[0, 14, :] - skel_joints[0, 19, :])
+                shoulder_width_loss = w_sw * (skel_shoulder_w - target_shoulder_width) ** 2
+
             # Marker loss in T-pose (joint + offset, rotation=identity in T-pose)
             marker_loss = torch.tensor(0.0, device=self.device)
             if (marker_handler is not None and marker_handler.num_markers > 0
@@ -189,6 +202,7 @@ class ScaleEstimator:
                 dj_reg_loss = self.config.weight_dj_reg * (dJ ** 2).mean()
 
             loss = (length_loss
+                    + shoulder_width_loss
                     + self.config.weight_marker_scale * marker_loss
                     + reg_loss
                     + dj_reg_loss)
@@ -244,7 +258,7 @@ class ScaleEstimator:
         self,
         height_m: float,
         shoulder_width_m: float,
-        gender: str = 'male',
+        sex: str = 'male',
     ) -> torch.Tensor:
         """
         Estimate betas from height and shoulder width.
@@ -254,13 +268,13 @@ class ScaleEstimator:
         Args:
             height_m: Subject height in meters.
             shoulder_width_m: Shoulder width in meters.
-            gender: 'male' or 'female'.
+            sex: 'male' or 'female'.
 
         Returns:
             betas: Estimated shape parameters [10].
         """
         # Baseline values for male SKEL model (from T-pose)
-        if gender == 'male':
+        if sex == 'male':
             baseline_height = 1.58  # meters
             baseline_shoulder = 0.35  # meters
         else:

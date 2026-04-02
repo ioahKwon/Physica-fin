@@ -80,108 +80,109 @@ POSE_PARAM_NAMES = [
 
 COMPREHENSIVE_POSE_LIMITS = {
     # =========================================================================
-    # PELVIS (DOF 0-2) - Literature based
-    # Sources: Physio-pedia, PMC5545133
+    # PELVIS (DOF 0-2) - NOT in SKEL official pose_limits
+    # 출처 미확인: Physio-pedia, PMC5545133에서 참고했으나 직접 확인하지 않음
+    # pelvis_rotation ±90°는 oscillation 문제 원인 — 좁힐 필요 있음
     # =========================================================================
-    'pelvis_tilt': [-0.35, 0.70],       # DOF 0: -20° to 40° (posterior to anterior)
-    'pelvis_list': [-0.52, 0.52],       # DOF 1: ±30° (lateral drop during gait)
-    'pelvis_rotation': [-1.57, 1.57],   # DOF 2: ±90° (expanded — gait/running needs full range)
+    'pelvis_tilt': [-0.35, 0.70],       # DOF 0: -20° to 40° — 출처 미확인
+    'pelvis_list': [-0.52, 0.52],       # DOF 1: ±30° — 출처 미확인
+    'pelvis_rotation': [-1.57, 1.57],   # DOF 2: ±90° — 출처 미확인 (oscillation 원인)
 
     # =========================================================================
-    # HIP (DOF 3-5, 10-12) - Literature based
-    # Sources: OrthoFixar, Physio-pedia, CDC
-    # Normal: Flex 120-135°, Ext 10-30°, Abd 45-50°, Add 20-30°, IR 30-40°, ER 40-60°
+    # HIP (DOF 3-5, 10-12) - NOT in SKEL official pose_limits
+    # 출처 미확인: OrthoFixar, Physio-pedia, CDC에서 참고했으나 직접 확인하지 않음
     # =========================================================================
-    'hip_flexion_r': [-0.52, 2.36],     # DOF 3: -30° to 135° (conservative)
-    'hip_adduction_r': [-0.87, 0.52],   # DOF 4: -50° (abduction) to 30° (adduction)
-    'hip_rotation_r': [-1.05, 0.70],    # DOF 5: -60° (external) to 40° (internal)
+    'hip_flexion_r': [-0.52, 2.36],     # DOF 3: -30° to 135° — 출처 미확인
+    'hip_adduction_r': [-0.87, 0.52],   # DOF 4: -50° to 30° — 출처 미확인
+    'hip_rotation_r': [-1.05, 0.70],    # DOF 5: -60° to 40° — 출처 미확인
 
-    'hip_flexion_l': [-0.52, 2.36],     # DOF 10: same as right
-    'hip_adduction_l': [-0.87, 0.52],   # DOF 11: same as right
-    'hip_rotation_l': [-1.05, 0.70],    # DOF 12: same as right
-
-    # =========================================================================
-    # KNEE (DOF 6, 13) - SKEL Official
-    # =========================================================================
-    'knee_angle_r': [0, 2.36],          # DOF 6: 0° to 135°
-    'knee_angle_l': [0, 2.36],          # DOF 13: 0° to 135°
+    'hip_flexion_l': [-0.52, 2.36],     # DOF 10: symmetric to right
+    'hip_adduction_l': [-0.87, 0.52],   # DOF 11: symmetric to right
+    'hip_rotation_l': [-1.05, 0.70],    # DOF 12: symmetric to right
 
     # =========================================================================
-    # ANKLE/FOOT (DOF 7-9, 14-16) - SKEL Official
+    # KNEE (DOF 6, 13) - SKEL Official (kin_skel.py)
     # =========================================================================
-    'ankle_angle_r': [-0.79, 0.79],     # DOF 7: ±45°
-    'subtalar_angle_r': [-0.79, 0.79],  # DOF 8: ±45°
-    'mtp_angle_r': [-0.79, 0.79],       # DOF 9: ±45°
-
-    'ankle_angle_l': [-0.79, 0.79],     # DOF 14: ±45°
-    'subtalar_angle_l': [-0.79, 0.79],  # DOF 15: ±45°
-    'mtp_angle_l': [-0.79, 0.79],       # DOF 16: ±45°
+    'knee_angle_r': [0, 2.356],          # DOF 6: 0° to 135° (SKEL: 3/4*π)
+    'knee_angle_l': [0, 2.356],          # DOF 13: 0° to 135° (SKEL: 3/4*π)
 
     # =========================================================================
-    # SPINE (DOF 17-22) - SKEL Official
+    # ANKLE/FOOT (DOF 7-9, 14-16) - SKEL Official (kin_skel.py)
     # =========================================================================
-    'lumbar_bending': [-0.52, 0.52],    # DOF 17: ±30°
-    'lumbar_extension': [-0.79, 0.79],  # DOF 18: ±45°
-    'lumbar_twist': [-0.79, 0.79],      # DOF 19: ±45°
+    'ankle_angle_r': [-0.785, 0.785],     # DOF 7: ±45° (SKEL: π/4)
+    'subtalar_angle_r': [-0.785, 0.785],  # DOF 8: ±45° (SKEL: π/4)
+    'mtp_angle_r': [-0.785, 0.785],       # DOF 9: ±45° (SKEL: π/4)
 
-    'thorax_bending': [-0.79, 0.79],    # DOF 20: ±45°
-    'thorax_extension': [-0.79, 0.79],  # DOF 21: ±45°
-    'thorax_twist': [-0.79, 0.79],      # DOF 22: ±45°
-
-    # =========================================================================
-    # HEAD (DOF 23-25) - SKEL Official
-    # =========================================================================
-    'head_bending': [-0.79, 0.79],      # DOF 23: ±45°
-    'head_extension': [-0.79, 0.79],    # DOF 24: ±45°
-    'head_twist': [-0.79, 0.79],        # DOF 25: ±45°
+    'ankle_angle_l': [-0.785, 0.785],     # DOF 14: ±45° (SKEL: π/4)
+    'subtalar_angle_l': [-0.785, 0.785],  # DOF 15: ±45° (SKEL: π/4)
+    'mtp_angle_l': [-0.785, 0.785],       # DOF 16: ±45° (SKEL: π/4)
 
     # =========================================================================
-    # RIGHT SCAPULA (DOF 26-28) - SKEL Official
+    # SPINE (DOF 17-22) - SKEL Official (kin_skel.py)
     # =========================================================================
-    'scapula_abduction_r': [-0.63, 0.63],   # DOF 26: ±36°
-    'scapula_elevation_r': [-0.4, 0.2],     # DOF 27: -23° to 11° (expanded — was too tight at -0.1)
-    'scapula_upward_rot_r': [-0.52, 0.52],  # DOF 28: ±30° (expanded — was too tight, caused clamping)
+    'lumbar_bending': [-0.524, 0.524],    # DOF 17: ±30° (SKEL: 2/3*π/4)
+    'lumbar_extension': [-0.9, 0.785],    # DOF 18: -51.6° to +45° (PR#38: lower bound widened from -π/4)
+    'lumbar_twist': [-0.785, 0.785],      # DOF 19: ±45° (SKEL: π/4)
+
+    'thorax_bending': [-0.785, 0.785],    # DOF 20: ±45° (SKEL: π/4)
+    'thorax_extension': [-0.785, 0.785],  # DOF 21: ±45° (SKEL: π/4)
+    'thorax_twist': [-0.785, 0.785],      # DOF 22: ±45° (SKEL: π/4)
 
     # =========================================================================
-    # RIGHT SHOULDER (DOF 29-31) - Mixed
-    # Sources: OrthoFixar, ShoulderDoc, Meloq
-    # Normal: Flex 160-180°, Ext 45-60°, IR 70-90°, ER 90-100°
+    # HEAD (DOF 23-25) - SKEL Official (kin_skel.py)
     # =========================================================================
-    'shoulder_r_x': [-1.05, 3.14],      # DOF 29: -60° to 180° (extension to flexion)
-    'shoulder_r_y': [-1.57, 1.57],      # DOF 30: ±90° (SKEL Official)
-    'shoulder_r_z': [-1.57, 1.57],      # DOF 31: ±90° (internal/external rotation)
+    'head_bending': [-0.785, 0.785],      # DOF 23: ±45° (SKEL: π/4)
+    'head_extension': [-0.785, 0.785],    # DOF 24: ±45° (SKEL: π/4)
+    'head_twist': [-0.785, 0.785],        # DOF 25: ±45° (SKEL: π/4)
 
     # =========================================================================
-    # RIGHT ELBOW/WRIST (DOF 32-35) - SKEL Official
+    # RIGHT SCAPULA (DOF 26-28) - PR#38 fix (github.com/MarilynKeller/SKEL/pull/38)
+    # Original SKEL had elevation entirely negative [-0.4,-0.1] → 0° outside range
+    # PR#38: widen to include 0° and match clinical ROM (Kenhub: Scapulothoracic joint)
     # =========================================================================
-    'elbow_flexion_r': [0, 2.36],       # DOF 32: 0° to 135°
-    'pro_sup_r': [-1.18, 1.18],         # DOF 33: ±68°
-    'wrist_flexion_r': [-1.57, 1.57],   # DOF 34: ±90°
-    'wrist_deviation_r': [-0.79, 0.79], # DOF 35: ±45°
+    'scapula_abduction_r': [-0.628, 0.628],    # DOF 26: ±36° (SKEL official, unchanged)
+    'scapula_elevation_r': [-0.5, 0.6981],     # DOF 27: -28.6° to +40° (PR#38)
+    'scapula_upward_rot_r': [-0.5236, 1.0472], # DOF 28: -30° to +60° (PR#38: -π/6 to π/3)
 
     # =========================================================================
-    # LEFT SCAPULA (DOF 36-38) - SKEL Official
-    # Note: scapula_elevation_l is flipped compared to right
+    # RIGHT SHOULDER (DOF 29-31)
+    # SKEL official defines only shoulder_r_y. Others from literature (출처 미확인).
     # =========================================================================
-    'scapula_abduction_l': [-0.63, 0.63],   # DOF 36: ±36°
-    'scapula_elevation_l': [-0.4, 0.2],     # DOF 37: -23° to 11° (expanded — was too tight at -0.1)
-    'scapula_upward_rot_l': [-0.52, 0.52],  # DOF 38: ±30° (expanded — was too tight, caused clamping)
+    'shoulder_r_x': [-1.05, 3.14],      # DOF 29: -60° to 180° — 출처 미확인 (literature)
+    'shoulder_r_y': [-1.571, 1.571],    # DOF 30: ±90° (SKEL official: [-π/2, π/2])
+    'shoulder_r_z': [-1.57, 1.57],      # DOF 31: ±90° — 출처 미확인 (literature)
 
     # =========================================================================
-    # LEFT SHOULDER (DOF 39-41) - Mixed
-    # Note: shoulder_l_y is NOT in SKEL official (only shoulder_r_y)
+    # RIGHT ELBOW/WRIST (DOF 32-35) - SKEL Official (kin_skel.py)
     # =========================================================================
-    'shoulder_l_x': [-1.57, 3.14],      # DOF 39: -90° to 180° (expanded — was clamped at -60°)
-    'shoulder_l_y': [-1.57, 1.57],      # DOF 40: ±90° (added, not in SKEL official)
-    'shoulder_l_z': [-1.57, 1.57],      # DOF 41: ±90° (same as right)
+    'elbow_flexion_r': [0, 2.356],       # DOF 32: 0° to 135° (SKEL: 3/4*π)
+    'pro_sup_r': [-1.178, 1.178],        # DOF 33: ±67.5° (SKEL: 3/4*π/2)
+    'wrist_flexion_r': [-1.571, 1.571],  # DOF 34: ±90° (SKEL: π/2)
+    'wrist_deviation_r': [-1.0, 0.785],  # DOF 35: -57° to +45° (PR#38: lower bound widened)
 
     # =========================================================================
-    # LEFT ELBOW/WRIST (DOF 42-45) - SKEL Official
+    # LEFT SCAPULA (DOF 36-38) - PR#38 fix (github.com/MarilynKeller/SKEL/pull/38)
+    # Original SKEL had [-0.1,-0.4] (min>max bug). PR#38 fixes and symmetrizes with right.
     # =========================================================================
-    'elbow_flexion_l': [0, 2.36],       # DOF 42: 0° to 135°
-    'pro_sup_l': [-1.57, 1.57],         # DOF 43: ±90°
-    'wrist_flexion_l': [-1.57, 1.57],   # DOF 44: ±90°
-    'wrist_deviation_l': [-0.79, 0.79], # DOF 45: ±45°
+    'scapula_abduction_l': [-0.628, 0.628],    # DOF 36: ±36° (SKEL official, unchanged)
+    'scapula_elevation_l': [-0.5, 0.6981],     # DOF 37: -28.6° to +40° (PR#38, symmetric to right)
+    'scapula_upward_rot_l': [-0.5236, 1.0472], # DOF 38: -30° to +60° (PR#38, symmetric to right)
+
+    # =========================================================================
+    # LEFT SHOULDER (DOF 39-41)
+    # SKEL official has NO left shoulder limits. Using symmetric to right.
+    # =========================================================================
+    'shoulder_l_x': [-1.05, 3.14],      # DOF 39: -60° to 180° — 출처 미확인, symmetric to right
+    'shoulder_l_y': [-1.571, 1.571],    # DOF 40: ±90° — symmetric to right (SKEL has shoulder_r_y only)
+    'shoulder_l_z': [-1.57, 1.57],      # DOF 41: ±90° — 출처 미확인, symmetric to right
+
+    # =========================================================================
+    # LEFT ELBOW/WRIST (DOF 42-45) - SKEL Official (kin_skel.py)
+    # =========================================================================
+    'elbow_flexion_l': [0, 2.356],       # DOF 42: 0° to 135° (SKEL: 3/4*π)
+    'pro_sup_l': [-1.571, 1.571],        # DOF 43: ±90° (SKEL: π/2)
+    'wrist_flexion_l': [-1.571, 1.571],  # DOF 44: ±90° (SKEL: π/2)
+    'wrist_deviation_l': [-1.0, 0.785],  # DOF 45: -57° to +45° (PR#38: lower bound widened)
 }
 
 

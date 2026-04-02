@@ -25,9 +25,37 @@ from .scapula_handler import ScapulaHandler
 from .joint_definitions import build_direct_joint_mapping, ADDB_JOINTS, SKEL_JOINTS
 
 
+def _estimate_sex(
+    height_m: float = None,
+    mass_kg: float = None,
+) -> str:
+    """Estimate biological sex from height and mass when B3D metadata is unavailable.
+
+    Uses a simple threshold based on adult population averages:
+    - CDC NHANES 2015-2018 (US adults 20+):
+      Male:   height=175.4cm, weight=90.6kg
+      Female: height=161.3cm, weight=77.5kg
+      Midpoint: height=168.3cm, weight=84.1kg
+    - Ref: Fryar et al. "Mean Body Weight, Height, Waist Circumference, and
+      Body Mass Index Among Adults" NCHS Health Statistics Reports, No. 122, 2018
+      https://www.cdc.gov/nchs/data/nhsr/nhsr122-508.pdf
+
+    Decision: If both available, use height (more discriminative).
+    If only mass, use mass threshold.
+    If neither, default to 'male'.
+    """
+    if height_m is not None and height_m > 0:
+        # CDC midpoint: (175.4 + 161.3) / 2 = 168.3 cm
+        return 'female' if height_m < 1.683 else 'male'
+    if mass_kg is not None and mass_kg > 0:
+        # CDC midpoint: (90.6 + 77.5) / 2 = 84.1 kg
+        return 'female' if mass_kg < 84.1 else 'male'
+    return 'male'
+
+
 def convert_addb_to_skel(
     addb_joints: np.ndarray,
-    gender: str = 'male',
+    sex: str = 'auto',
     config: Optional[OptimizationConfig] = None,
     height_m: Optional[float] = None,
     shoulder_width_m: Optional[float] = None,
@@ -53,7 +81,8 @@ def convert_addb_to_skel(
 
     Args:
         addb_joints: AddB joint positions [T, 20, 3] in meters.
-        gender: Subject gender ('male' or 'female').
+        sex: Subject biological sex ('male', 'female', or 'auto').
+             'auto' estimates from height/mass using population statistics.
         config: Optimization configuration. Default: DEFAULT_CONFIG.
         height_m: Optional subject height in meters (for initialization).
         shoulder_width_m: Optional shoulder width in meters.
@@ -70,12 +99,17 @@ def convert_addb_to_skel(
     config = config or DEFAULT_CONFIG
     device = config.get_device()
 
+    # Auto-detect sex for SKEL model selection
+    # If sex is not 'male'/'female', estimate from height and mass.
+    if sex not in ('male', 'female'):
+        sex = _estimate_sex(height_m, mass_kg)
+
     if verbose:
         print("=" * 60)
         print("AddB → SKEL Conversion Pipeline (Virtual Marker IK)")
         print("=" * 60)
         print(f"Input: {addb_joints.shape[0]} frames, {addb_joints.shape[1]} joints")
-        print(f"Gender: {gender}")
+        print(f"Sex: {sex}")
         print(f"Device: {device}")
 
     # Validate input shape
@@ -127,7 +161,7 @@ def convert_addb_to_skel(
     # Initialize SKEL model
     if verbose:
         print("\n--- Loading SKEL Model ---")
-    skel = create_skel_interface(gender=gender, device=str(device))
+    skel = create_skel_interface(sex=sex, device=str(device))
 
     # =========================================================================
     # Stage 1: Beta Estimation (bone lengths + marker pairwise distances)
@@ -231,17 +265,24 @@ def convert_addb_to_skel(
             if verbose:
                 print(f"  Done.")
 
-    # Method C: Two-pass — try 0° and 180° pelvis rotation, pick lower MPJPE
+    # Auto-adaptive pelvis: enabled after four-pass if probe can't discriminate directions
+
+    # Method C: Four-pass — try 0°/90°/180°/270° pelvis rotation, pick lower MPJPE
+    # Why 4 directions: R_90_Y transform maps AddB pelvis to SKEL, but subjects
+    # walking along +X or -X axis land pelvis_Y at ±90°, which is 90° away from
+    # both 0° and 180° probes. Adding 90°/270° covers all cardinal directions.
     if getattr(config, 'use_two_pass', False) and skel_q_reference is not None:
         import copy
         two_pass_iters = getattr(config, 'two_pass_iters', 20)
+        offsets = [0.0, np.pi / 2, np.pi, 3 * np.pi / 2]
         if verbose:
-            print(f"  Two-pass probe: {two_pass_iters} iters × 2 directions...")
+            print(f"  Four-pass probe: {two_pass_iters} iters × {len(offsets)} directions...")
 
         best_pass_mpjpe = float('inf')
         best_q_ref = skel_q_reference
+        probe_results = []
 
-        for pass_idx, pelvis_offset in enumerate([0.0, np.pi]):
+        for pass_idx, pelvis_offset in enumerate(offsets):
             q_ref_trial = skel_q_reference.copy()
             q_ref_trial[:, 2] += pelvis_offset  # pelvis_rotation DOF
 
@@ -257,6 +298,7 @@ def convert_addb_to_skel(
                 skel_q_reference=q_ref_trial,
             )
             probe_mpjpe = probe_stats.get('mpjpe_mm', float('inf'))
+            probe_results.append(probe_mpjpe)
             if verbose:
                 print(f"    Pass {pass_idx} (offset={np.degrees(pelvis_offset):.0f}°): MPJPE={probe_mpjpe:.1f}mm")
 
@@ -268,17 +310,55 @@ def convert_addb_to_skel(
         if verbose:
             print(f"    Selected: offset with MPJPE={best_pass_mpjpe:.1f}mm")
 
-    poses, trans, pose_stats = optimize_poses(
-        addb_joints_converted,
-        betas,
-        skel,
-        config,
-        verbose=verbose,
-        marker_handler=pose_marker_handler,
-        addb_poses=addb_poses_arr,
-        dJ=dJ,
-        skel_q_reference=skel_q_reference,
-    )
+        # Auto-adaptive: if probe can't discriminate (all MPJPEs similar),
+        # the direction is ambiguous → enable adaptive pelvis limit
+        if getattr(config, 'auto_adaptive_pelvis', False):
+            spread = max(probe_results) - min(probe_results)
+            if spread < 10.0:  # < 10mm spread = can't discriminate at all
+                config.use_adaptive_pelvis_limit = True
+                config.use_direction_first = False
+                config.auto_adaptive_pelvis = False  # consumed, prevent double-apply
+                if verbose:
+                    print(f"    Auto-adaptive: probe spread={spread:.1f}mm (<10) → adaptive ON, Phase A OFF")
+            else:
+                config.use_adaptive_pelvis_limit = False  # explicitly OFF
+                config.auto_adaptive_pelvis = False  # consumed
+                if verbose:
+                    print(f"    Auto-adaptive: probe spread={spread:.1f}mm (>=10) → baseline settings")
+
+    if config.use_sequential or config.use_sliding_window:
+        from .pose_optimization import PoseOptimizer
+        device = config.get_device()
+        addb_joints_t = torch.from_numpy(addb_joints_converted).float().to(device)
+        opt = PoseOptimizer(skel, config, marker_handler=pose_marker_handler)
+        if config.use_sequential:
+            if verbose:
+                print("\n--- Stage 2: Sequential Optimization ---")
+            poses, trans, pose_stats = opt.optimize_sequence_sequential(
+                addb_joints_t, betas, verbose=verbose,
+                addb_poses=addb_poses_arr, dJ=dJ,
+                skel_q_reference=skel_q_reference,
+            )
+        else:
+            if verbose:
+                print("\n--- Stage 2: Sliding Window Optimization ---")
+            poses, trans, pose_stats = opt.optimize_sequence_sliding(
+                addb_joints_t, betas, verbose=verbose,
+                addb_poses=addb_poses_arr, dJ=dJ,
+                skel_q_reference=skel_q_reference,
+            )
+    else:
+        poses, trans, pose_stats = optimize_poses(
+            addb_joints_converted,
+            betas,
+            skel,
+            config,
+            verbose=verbose,
+            marker_handler=pose_marker_handler,
+            addb_poses=addb_poses_arr,
+            dJ=dJ,
+            skel_q_reference=skel_q_reference,
+        )
 
     # Use optimized betas from Stage 2
     if 'final_betas' in pose_stats:
@@ -636,12 +716,13 @@ def convert_addb_to_skel(
         virtual_marker_names=virtual_marker_names,
         foot_marker_offsets=foot_marker_offsets,
         marker_quality=pose_stats.get('marker_stats') or marker_quality,
+        marker_tier_counts=getattr(marker_handler, '_tier_counts', None) if marker_handler else None,
         mpjpe_mm=best_mpjpe,
         per_joint_error=pose_stats.get('per_joint_error_mm'),
         scapula_dofs=pose_stats['scapula_dofs'],
         evaluation_metrics=evaluation_metrics,
         num_frames=T,
-        gender=gender,
+        sex=sex,
         scale_stats=scale_stats,
         finetune_stats=pose_stats,
     )
@@ -710,7 +791,7 @@ def save_conversion_result(
         np.savez(os.path.join(output_dir, 'skel_params.npz'), **save_data)
         print(f"Saved parameters to {output_dir}/skel_params.npz")
 
-    skel = create_skel_interface(result.gender) if (save_obj or save_comparison_obj) else None
+    skel = create_skel_interface(result.sex) if (save_obj or save_comparison_obj) else None
 
     # Save OBJ files
     if save_obj and skel is not None:
@@ -785,7 +866,9 @@ def quick_convert(
         print(f"  Subject: height={metadata['height_m']:.2f}m, "
               f"mass={metadata['mass_kg']:.1f}kg, sex={metadata['sex']}")
 
-    gender = 'male' if metadata['sex'] == 'male' else 'female'
+    sex = metadata.get('sex', 'male')
+    if sex not in ('male', 'female'):
+        sex = 'male'
 
     # Configure for virtual marker pipeline
     config = OptimizationConfig()
@@ -798,7 +881,7 @@ def quick_convert(
 
     result = convert_addb_to_skel(
         addb_joints,
-        gender=gender,
+        sex=sex,
         config=config,
         height_m=metadata['height_m'],
         mass_kg=metadata.get('mass_kg'),

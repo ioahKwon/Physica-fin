@@ -292,108 +292,224 @@ class MarkerHandler:
                 f"{n_valid_frames}/{T} frames with all markers visible")
 
 
-# Marker name alias table: alternative name (UPPER) -> BSM name (UPPER)
-# Maps common anatomical/dataset-specific names to standard BSM names.
-# Covers Carter2023, Falisse2017, and other common naming conventions.
+# =============================================================================
+# T1 Redirect table: BSM name → corrected BSM name
+#
+# When a dataset marker has the SAME NAME as a BSM marker (T1 exact match),
+# but the BSM marker is at a DIFFERENT anatomical location than the standard
+# biomechanics convention, redirect to the correct BSM marker.
+#
+# Example: PiG "LTOE" = 2nd metatarsal head, but BSM "LTOE" = toe tip (67mm apart).
+# =============================================================================
+T1_REDIRECT_TABLE = {
+    'LTOE': 'LTOS',   # PiG LTOE = 2nd MT head; BSM LTOE = toe tip (67mm error). Redirect to BSM LTOS.
+    'RTOE': 'RTOS',   # Same for right side.
+}
+
+# =============================================================================
+# Marker name alias table: alternative name (UPPER) → BSM name (UPPER)
+#
+# Maps dataset-specific anatomical marker names to standard BSM names.
+# Each entry is annotated with:
+#   - Source dataset(s)
+#   - Anatomical basis for the mapping
+#   - Confidence: HIGH = same anatomical landmark
+#                 MEDIUM = nearby landmark (~15-50mm offset)
+#                 LOW = distant/approximate mapping (>50mm, use with caution)
+#
+# Vertex indices are determined by BSM marker definitions (bsm_markers.yaml).
+# =============================================================================
 MARKER_ALIAS_TABLE = {
-    # Knee (무릎)
-    'LFLE': 'LKNE',     # Lateral Femoral Epicondyle → Knee lateral
-    'RFLE': 'RKNE',
-    'LFME': 'LKNI',     # Medial Femoral Epicondyle → Knee medial
-    'RFME': 'RKNI',
-    'LKNEMED': 'LKNI',  # Falisse2017
-    'RKNEMED': 'RKNI',
-    # Pelvis (골반)
-    'LASIS': 'LFWT',    # Anterior Superior Iliac Spine → Front Waist
-    'RASIS': 'RFWT',
-    'LASI': 'LFWT',     # Falisse2017
-    'RASI': 'RFWT',
-    'LPSIS': 'LPSI',    # Posterior SIS → LPSI (exact anatomical match)
-    'RPSIS': 'RPSI',
-    # LPSI, RPSI: now defined directly in bsm_markers.yaml → Tier 1 match
-    # 'LPSI': 'LBWT',  # removed: yaml has LPSI vertex
-    # 'RPSI': 'RBWT',  # removed: yaml has RPSI vertex
-    # Ankle (발목)
-    'LFAL': 'LANK',     # Lateral Fibular Ankle
-    'RFAL': 'RANK',
-    'LTAM': 'LTIC',     # Medial Tibial Ankle → Tibia Inner Condyle
-    'RTAM': 'RTIC',
-    'LANKMED': 'LTIC',  # Falisse2017
-    'RANKMED': 'RTIC',
-    # Heel / Toe (발)
-    'LCAL': 'LHEE',     # Calcaneus → Heel
-    'RCAL': 'RHEE',
-    'L1MTP': 'LTOS',    # 1st Metatarsal Head → LTOS (toe second, v3350, 42mm)
-    'R1MTP': 'RTOS',    # 1st Metatarsal Head → RTOS (toe second, v6750, 45mm)
-    'L5MTP': 'LFPI',    # 5th Metatarsal Head → LFPI (foot pinky, v3223, 15mm)
-    'R5MTP': 'RFPI',    # 5th Metatarsal Head → RFPI (foot pinky, v6623, 24mm)
-    # Elbow (팔꿈치)
-    'LHLE': 'LELB',     # Lateral Humeral Epicondyle
-    'RHLE': 'RELB',
-    # Wrist (손목)
-    'LRSP': 'LWRA',     # Radial Styloid Process → Wrist A
-    'RRSP': 'RWRA',
-    'LUSP': 'LWRB',     # Ulnar Styloid Process → Wrist B
-    'RUSP': 'RWRB',
-    # Spine / Thorax (척추)
-    'CV7': 'C7',
-    'SJN': 'CLAV',      # Sternal Jugular Notch → Clavicle
-    'STRN': 'CLAV',     # Falisse2017
-    # T10: now defined directly in bsm_markers.yaml (vidx=3508) → Tier 1 match
-    'RBAK': 'RBAC',     # Right back → BSM Right Back
-    'LLATFOOT': 'LMT5', # Left lateral foot → 5th metatarsal (closest BSM foot marker)
-    'RLATFOOT': 'RMT5', # Right lateral foot → 5th metatarsal
-    # SACR: now defined directly in bsm_markers.yaml → Tier 1 match
-    # Shoulder (어깨)
-    'LSAJ': 'LSHO',     # Shoulder Acromial Joint
-    'RSAJ': 'RSHO',
-    # Han2023 convention (prefix_anatomicalname 패턴)
-    'TRUNK_C7':      'C7',
-    'TRUNK_STRN':    'CLAV',    # sternum → clavicle
-    'TRUNK_MANU':    'CLAV',    # manubrium → clavicle
-    'TRUNK_XYPH':    'LUMB',    # xyphoid → lumbar (nearest BSM)
-    'TRUNK_T8':      'LUMB',    # T8 → Lumbar (T10 is not in yaml, use LUMB as nearest BSM)
-    'TRUNK_T12':     'LUMB',    # T12 → lumbar
-    'TRUNK_ABDL':    'LUMB',    # abdomen → lumbar
-    'PELVIS_SAC':    'SACR',    # pelvis_sac → SACR
-    'PELVIS_L_PSIS': 'LPSI',   # pelvis_l_psis → LPSI
-    'PELVIS_R_PSIS': 'RPSI',
-    'PELVIS_L_ASIS': 'LFWT',
-    'PELVIS_R_ASIS': 'RFWT',
-    'PELVIS_L_ILCR': 'LBWT',   # iliac crest → back waist
-    'PELVIS_R_ILCR': 'RBWT',
-    'L_ACRO':        'LSHO',    # acromion → shoulder
-    'R_ACRO':        'RSHO',
-    'L_ANK_LAT':     'LANK',    # ankle lateral
-    'R_ANK_LAT':     'RANK',
-    'L_ANK_MED':     'LTIC',    # ankle medial → tibia inner condyle
-    'R_ANK_MED':     'RTIC',
-    'L_KNEE_LAT':    'LKNE',
-    'R_KNEE_LAT':    'RKNE',
-    'L_KNEE_MED':    'LKNI',
-    'R_KNEE_MED':    'RKNI',
-    'L_ELB_LAT':     'LELB',
-    'R_ELB_LAT':     'RELB',
-    'L_WRI_LAT':     'LWRA',
-    'R_WRI_LAT':     'RWRA',
-    'L_WRI_MED':     'LWRB',
-    'R_WRI_MED':     'RWRB',
-    'L_HIP_GRTR':    'LFWT',   # greater trochanter → front waist (nearest pelvis BSM)
-    'R_HIP_GRTR':    'RFWT',
-    # Head (머리) — alternate naming conventions
+    # ---- Knee (무릎) ---- [HIGH confidence: epicondyle = knee marker]
+    'LFLE': 'LKNE',     # [Carter] Lateral Femoral Epicondyle → Knee lateral (same landmark) HIGH
+    'RFLE': 'RKNE',     # [Carter] HIGH
+    'LFME': 'LKNI',     # [Carter] Medial Femoral Epicondyle → Knee medial (same landmark) HIGH
+    'RFME': 'RKNI',     # [Carter] HIGH
+    'LKNEMED': 'LKNI',  # [Falisse] Knee medial HIGH
+    'RKNEMED': 'RKNI',  # [Falisse] HIGH
+
+    # ---- Pelvis (골반) ---- [HIGH: ASIS/PSIS are standard landmarks]
+    'LASIS': 'LFWT',    # [Carter] Anterior Superior Iliac Spine → Front Waist HIGH
+    'RASIS': 'RFWT',    # [Carter] HIGH
+    'LASI': 'LFWT',     # [Falisse] ASIS → Front Waist HIGH
+    'RASI': 'RFWT',     # [Falisse] HIGH
+    'LPSIS': 'LPSI',    # [Carter] Posterior SIS → LPSI (exact match) HIGH
+    'RPSIS': 'RPSI',    # [Carter] HIGH
+
+    # ---- Ankle (발목) ---- [HIGH: malleolus = ankle marker]
+    'LFAL': 'LANK',     # [Carter] Lateral Fibular Ankle (lat. malleolus) HIGH
+    'RFAL': 'RANK',     # [Carter] HIGH
+    'LTAM': 'LAKI',     # [Carter] Medial Tibial Ankle (medial malleolus) → BSM LAKI (NOT LTIC — LTIC is 80mm above ankle) HIGH
+    'RTAM': 'RAKI',     # [Carter] HIGH
+    'LANKMED': 'LAKI',  # [Falisse] Medial ankle → BSM LAKI (medial malleolus) HIGH
+    'RANKMED': 'RAKI',  # [Falisse] HIGH
+
+    # ---- Heel / Toe (발) ---- [HIGH for heel, MEDIUM for MTP]
+    'LCAL': 'LHEE',     # [Carter] Calcaneus → Heel (same landmark) HIGH
+    'RCAL': 'RHEE',     # [Carter] HIGH
+    'L1MTP': 'LTOS',    # [Carter] 1st MTP head → LTOS (BSM v3350, ~42mm offset) MEDIUM
+    'R1MTP': 'RTOS',    # [Carter] 1st MTP head → RTOS (BSM v6750, ~45mm offset) MEDIUM
+    'L5MTP': 'LFPI',    # [Carter] 5th MTP head → Foot Pinky (BSM v3223, ~15mm) HIGH
+    'R5MTP': 'RFPI',    # [Carter] 5th MTP head → Foot Pinky (BSM v6623, ~24mm) HIGH
+
+    # ---- Elbow (팔꿈치) ---- [HIGH: humeral epicondyle = elbow marker]
+    'LHLE': 'LELB',     # [Carter] Lateral Humeral Epicondyle HIGH
+    'RHLE': 'RELB',     # [Carter] HIGH
+
+    # ---- Wrist (손목) ---- [HIGH: styloid process = wrist marker]
+    'LRSP': 'LWRA',     # [Carter] Radial Styloid → Wrist A HIGH
+    'RRSP': 'RWRA',     # [Carter] HIGH
+    'LUSP': 'LWRB',     # [Carter] Ulnar Styloid → Wrist B HIGH
+    'RUSP': 'RWRB',     # [Carter] HIGH
+
+    # ---- Spine / Thorax (척추) ----
+    'CV7': 'C7',        # [Carter] C7 vertebra HIGH
+    'SJN': 'CLAV',      # [Carter] Sternal Jugular Notch → Clavicle MEDIUM (~30mm, both anterior upper thorax)
+    'STRN': 'CLAV',     # [Falisse] Sternum → Clavicle MEDIUM
+    'RBAK': 'RBAC',     # [Carter] Right back → BSM Right Back HIGH
+
+    # ---- Foot lateral ----
+    'LLATFOOT': 'LMT5', # Left lateral foot → 5th metatarsal MEDIUM
+    'RLATFOOT': 'RMT5', # Right lateral foot MEDIUM
+
+    # ---- Shoulder (어깨) ---- [HIGH: acromial = shoulder marker]
+    'LSAJ': 'LSHO',     # [Carter] Shoulder Acromial Joint HIGH
+    'RSAJ': 'RSHO',     # [Carter] HIGH
+
+    # ---- Han2023 convention (prefix_anatomicalname) ----
+    'TRUNK_C7':      'C7',      # [Han] C7 vertebra HIGH
+    'TRUNK_STRN':    'CLAV',    # [Han] sternum → clavicle MEDIUM
+    'TRUNK_MANU':    'CLAV',    # [Han] manubrium → clavicle MEDIUM (~30mm)
+    # REMOVED: TRUNK_XYPH→LUMB (226mm apart, xyphoid=anterior chest, LUMB=posterior lumbar)
+    # REMOVED: TRUNK_T8→LUMB (97mm apart, T8=mid-thoracic, LUMB=L3/L4)
+    # REMOVED: TRUNK_T12→LUMB (different vertebral level, multiple markers→same BSM causes conflict)
+    # REMOVED: TRUNK_ABDL→LUMB (281mm apart, abdomen=anterior, LUMB=posterior)
+    'PELVIS_SAC':    'SACR',    # [Han] sacrum → SACR HIGH
+    'PELVIS_L_PSIS': 'LPSI',   # [Han] L PSIS → LPSI HIGH
+    'PELVIS_R_PSIS': 'RPSI',   # [Han] R PSIS HIGH
+    'PELVIS_L_ASIS': 'LFWT',   # [Han] L ASIS → Front Waist HIGH
+    'PELVIS_R_ASIS': 'RFWT',   # [Han] HIGH
+    'PELVIS_L_ILCR': 'LBWT',   # [Han] iliac crest → back waist MEDIUM (~30mm)
+    'PELVIS_R_ILCR': 'RBWT',   # [Han] MEDIUM
+    'L_ACRO':        'LSHO',   # [Han] acromion → shoulder HIGH
+    'R_ACRO':        'RSHO',   # [Han] HIGH
+    'L_ANK_LAT':     'LANK',   # [Han] ankle lateral HIGH
+    'R_ANK_LAT':     'RANK',   # [Han] HIGH
+    'L_ANK_MED':     'LAKI',   # [Han] ankle medial (medial malleolus) → BSM LAKI HIGH
+    'R_ANK_MED':     'RAKI',   # [Han] HIGH
+    'L_KNEE_LAT':    'LKNE',   # [Han] knee lateral HIGH
+    'R_KNEE_LAT':    'RKNE',   # [Han] HIGH
+    'L_KNEE_MED':    'LKNI',   # [Han] knee medial HIGH
+    'R_KNEE_MED':    'RKNI',   # [Han] HIGH
+    'L_ELB_LAT':     'LELB',   # [Han] elbow lateral HIGH
+    'R_ELB_LAT':     'RELB',   # [Han] HIGH
+    'L_WRI_LAT':     'LWRA',   # [Han] wrist lateral HIGH
+    'R_WRI_LAT':     'RWRA',   # [Han] HIGH
+    'L_WRI_MED':     'LWRB',   # [Han] wrist medial HIGH
+    'R_WRI_MED':     'RWRB',   # [Han] HIGH
+    # REMOVED: L_HIP_GRTR→LFWT (128mm apart, trochanter=lateral femur, LFWT=ASIS anterior pelvis)
+    # REMOVED: R_HIP_GRTR→RFWT (same issue)
+
+    # ---- Head (머리) ----
     # NOTE: FL/FR/BL/BR are force plate corners in Carter2023, NOT head markers.
-    'FRHD': 'RFHD',    # alternate naming for front/back head markers
-    'FLHD': 'LFHD',
-    'BRHD': 'RBHD',
-    'BLHD': 'LBHD',
-    # Foot — Carter2023 (metatarsal base / hallux)
-    'LB5MTP': 'LMT5',  # 5th Metatarsal Base → LMT5
-    'RB5MTP': 'RMT5',
-    'LB1MTP': 'LTOS',  # 1st Metatarsal Base → LTOS (toe second)
-    'RB1MTP': 'RTOS',
-    'LHAL': 'LTOE',    # Hallux (big toe) → LTOE
-    'RHAL': 'RTOE',
-    # NOTE: LPT/RPT are force plate markers in Carter2023 (Y~0.07m, near ground), NOT thigh markers.
+    'FRHD': 'RFHD',    # alternate naming for front/back head markers HIGH
+    'FLHD': 'LFHD',    # HIGH
+    'BRHD': 'RBHD',    # HIGH
+    'BLHD': 'LBHD',    # HIGH
+
+    # ---- Foot — Carter2023 (metatarsal base / hallux) ----
+    # REMOVED: LB5MTP→LMT5 (5th MT BASE/styloid ≠ HEAD, ~50mm apart)
+    # REMOVED: RB5MTP→RMT5 (same)
+    # REMOVED: LB1MTP→LTOS (1st MT BASE ≠ HEAD, ~60mm apart)
+    # REMOVED: RB1MTP→RTOS (same)
+    'LHAL': 'LTOE',    # [Carter] Hallux (big toe tip) → LTOE HIGH
+    'RHAL': 'RTOE',    # [Carter] HIGH
+    # NOTE: LPT/RPT are force plate markers in Carter2023 (Y~0.07m), NOT thigh markers.
+
+    # ---- Fregly2012 (dot-separated names, Cleveland Clinic marker set) ----
+    # Ref: Fregly et al. 2012 J Orthop Res; PiG standard conventions
+    'L.ASIS':      'LFWT',   # [Fregly] ASIS HIGH
+    'R.ASIS':      'RFWT',   # [Fregly] HIGH
+    'L.PSIS':      'LPSI',   # [Fregly] PSIS HIGH
+    'R.PSIS':      'RPSI',   # [Fregly] HIGH
+    'L.HEEL':      'LHEE',   # [Fregly] Calcaneus HIGH
+    'R.HEEL':      'RHEE',   # [Fregly] HIGH
+    'L.TOE':       'LTOS',   # [Fregly] 2nd metatarsal head (PiG standard) → BSM LTOS (NOT LTOE, which is toe tip) HIGH
+    'R.TOE':       'RTOS',   # [Fregly] HIGH
+    'L.SHOULDER':  'LSHO',   # [Fregly] Acromion HIGH
+    'R.SHOULDER':  'RSHO',   # [Fregly] HIGH
+    'L.ELBOW':     'LELB',   # [Fregly] Lateral humeral epicondyle HIGH
+    'R.ELBOW':     'RELB',   # [Fregly] HIGH
+    'L.RADIUS':    'LWRA',   # [Fregly] Radial styloid HIGH
+    'R.RADIUS':    'RWRA',   # [Fregly] HIGH
+    'L.ULNA':      'LWRB',   # [Fregly] Ulnar styloid HIGH
+    'R.ULNA':      'RWRB',   # [Fregly] HIGH
+    'SACRAL':      'SACR',   # [Fregly] Sacrum midpoint HIGH
+    'NECK':        'C7',     # [Fregly] C7 spinous process (ISB standard) HIGH
+    'LUMBAR':      'LUMB',   # [Fregly] Lumbar spine (L3-L5 spinous process) HIGH
+
+    # ---- Tiziana2019 (Lx/Rx prefix, LAMB protocol) ----
+    # Ref: Lencioni et al. 2019 Sci Data; Rabuffetti et al. 2019 (LAMB protocol)
+    'LXASIS':      'LFWT',   # [Tiziana] ASIS (paper confirmed) HIGH
+    'RXASIS':      'RFWT',   # [Tiziana] HIGH
+    'LXLATMAL':    'LANK',   # [Tiziana] Lateral malleolus (paper confirmed) HIGH
+    'RXLATMAL':    'RANK',   # [Tiziana] HIGH
+    'LXLATCON':    'LKNE',   # [Tiziana] Lateral femoral condyle (paper confirmed) HIGH
+    'RXLATCON':    'RKNE',   # [Tiziana] HIGH
+    'LXMETA5':     'LMT5',   # [Tiziana] 5th MT head (paper confirmed: "META5") HIGH
+    'RXMETA5':     'RMT5',   # [Tiziana] HIGH
+    'LXHEEL':      'LHEE',   # [Tiziana] Calcaneus (calcn body attachment) HIGH
+    'RXHEEL':      'RHEE',   # [Tiziana] HIGH
+    'LXSHOULD':    'LSHO',   # [Tiziana] Acromion HIGH
+    'RXSHOULD':    'RSHO',   # [Tiziana] HIGH
+    'LXSHOULDER':  'LSHO',   # [Tiziana] alternate spelling
+    'RXSHOULDER':  'RSHO',   # [Tiziana] alternate spelling
+    'LXELBOW':     'LELB',   # [Tiziana] Lateral humeral epicondyle HIGH
+    'RXELBOW':     'RELB',   # [Tiziana] HIGH
+    # NOTE: LxToe1 = 1st MT head (META1), NOT same as BSM LTOE (2nd MT head). Do NOT alias.
+    # NOTE: LxFH = Fibular Head (NOT femoral head). No BSM equivalent. Do NOT alias.
+
+    # ---- vanderZee2022 ----
+    # Ref: van der Zee et al. 2022 Sci Data, Table 3
+    'LAC':         'LSHO',   # [vanderZee] Acromion (paper confirmed) HIGH
+    'RAC':         'RSHO',   # [vanderZee] HIGH
+    'LLML':        'LANK',   # [vanderZee] Lateral malleolus (paper confirmed) HIGH
+    'RLML':        'RANK',   # [vanderZee] HIGH
+    'LMML':        'LAKI',   # [vanderZee] Medial malleolus → BSM LAKI (NOT LTIC!) HIGH
+    'RMML':        'RAKI',   # [vanderZee] HIGH
+    'LLEP':        'LKNE',   # [vanderZee] Lateral KNEE epicondyle (NOT elbow!) HIGH
+    'RLEP':        'RKNE',   # [vanderZee] HIGH
+    'LMEP':        'LKNI',   # [vanderZee] Medial KNEE epicondyle HIGH
+    'RMEP':        'RKNI',   # [vanderZee] HIGH
+    'L5TH':        'LMT5',   # [vanderZee] 5th metatarsal HIGH
+    'R5TH':        'RMT5',   # [vanderZee] HIGH
+    'LEP':         'LELB',   # [vanderZee] Elbow epicondyle (single marker, lateral) HIGH
+    'REP':         'RELB',   # [vanderZee] HIGH
+    # NOTE: LWR/RWR = single wrist marker, side unknown. Do NOT alias.
+    # NOTE: LGTR/RGTR = greater trochanter, no BSM match. Do NOT alias.
+
+    # ---- Hammer2013 ----
+    # Ref: Hamner et al. 2010/2013 J Biomech; OpenSim model Setup_Scale.xml
+    'LACR':        'LSHO',   # [Hammer] Acromion (OpenSim "L.Acromium") HIGH
+    'RACR':        'RSHO',   # [Hammer] HIGH
+    'LLEL':        'LELB',   # [Hammer] Lateral elbow epicondyle HIGH
+    'RLEL':        'RELB',   # [Hammer] HIGH
+    'LFARADIUS':   'LWRA',   # [Hammer] Radial styloid (OpenSim "Wrist.Lat") HIGH
+    'RFARADIUS':   'RWRA',   # [Hammer] HIGH
+    'LFAULNA':     'LWRB',   # [Hammer] Ulnar styloid (OpenSim "Wrist.Med") HIGH
+    'RFAULNA':     'RWRB',   # [Hammer] HIGH
+
+    # ---- Moore2015 ----
+    # Ref: Moore et al. 2015 PeerJ Table 2; HBM protocol (van den Bogert 2013)
+    'LLEE':        'LELB',   # [Moore] Lateral elbow epicondyle (Table 2) HIGH
+    'RLEE':        'RELB',   # [Moore] HIGH
+    'LLM':         'LANK',   # [Moore] Lateral malleolus (Table 2) HIGH
+    'RLM':         'RANK',   # [Moore] HIGH
+    'LLW':         'LWRB',   # [Moore] "Lateral Wrist" = ulnar styloid (Table 2: "styloid process ulna, pinky side") HIGH
+    'RLW':         'RWRB',   # [Moore] HIGH
+    'LMW':         'LWRA',   # [Moore] "Medial Wrist" = radial styloid (Table 2: "styloid process radius, thumb side") HIGH
+    'RMW':         'RWRA',   # [Moore] HIGH
+    # NOTE: LGTRO/RGTRO = greater trochanter, no BSM match. Do NOT alias.
 }
 
 
@@ -675,9 +791,12 @@ class BSMVertexMarkerHandler:
             if upper_name in blacklist_upper:
                 continue
 
-            # Tier 1: Exact case-insensitive BSM name match
-            if upper_name in self._bsm_lookup:
-                bsm_name, vidx = self._bsm_lookup[upper_name]
+            # T1 Redirect: fix BSM naming conflicts (e.g. PiG LTOE ≠ BSM LTOE)
+            redirected_name = T1_REDIRECT_TABLE.get(upper_name, upper_name)
+
+            # Tier 1: Exact case-insensitive BSM name match (after redirect)
+            if redirected_name in self._bsm_lookup:
+                bsm_name, vidx = self._bsm_lookup[redirected_name]
                 if vidx not in used_bsm:
                     matched_names.append(addb_name)
                     matched_vidx.append(vidx)
@@ -723,9 +842,12 @@ class BSMVertexMarkerHandler:
             if upper_name in blacklist_upper:
                 continue
 
-            # Tier 1: BSM name match
-            if upper_name in self._bsm_lookup:
-                bsm_name, vidx = self._bsm_lookup[upper_name]
+            # T1 Redirect
+            redirected_name = T1_REDIRECT_TABLE.get(upper_name, upper_name)
+
+            # Tier 1: BSM name match (after redirect)
+            if redirected_name in self._bsm_lookup:
+                bsm_name, vidx = self._bsm_lookup[redirected_name]
                 if vidx not in used_bsm:
                     matched_names.append(addb_name)
                     matched_vidx.append(vidx)

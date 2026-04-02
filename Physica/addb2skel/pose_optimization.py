@@ -686,6 +686,11 @@ class PoseOptimizer:
         # Pose bounds for clamping (comprehensive limits from literature)
         self.pose_lower, self.pose_upper = get_pose_bounds_tensor(self.device)
 
+        # Fix F: Remove pelvis rotation limit (SKEL original has no limit for pelvis DOFs)
+        if getattr(config, 'pelvis_rotation_unlimited', False):
+            self.pose_lower[2] = -torch.pi  # pelvis_rotation: full range
+            self.pose_upper[2] = torch.pi
+
         # q-matching reference (set in optimize_sequence if addb_poses provided)
         self._addb_q_reference = None
         self._addb_q_mask = None
@@ -1189,6 +1194,42 @@ class PoseOptimizer:
                 n_mapped = int(q_mask.sum().item())
                 print(f"  q-match reference: {n_mapped} mapped DOFs (scale-based)")
 
+        # Fix E: Tighten DOF limits around q_reference
+        if getattr(self.config, 'use_tight_dof_limits', False) and self._addb_q_reference is not None:
+            margin = self.config.tight_dof_margin_rad
+            q_ref_median = self._addb_q_reference.median(dim=0).values  # [46]
+            tight_lower = q_ref_median - margin
+            tight_upper = q_ref_median + margin
+            # Only tighten (intersection with original limits), never widen
+            self.pose_lower = torch.max(self.pose_lower, tight_lower)
+            self.pose_upper = torch.min(self.pose_upper, tight_upper)
+            # Re-clamp initial poses
+            initial_poses = clamp_poses(initial_poses, self.pose_lower, self.pose_upper)
+            if verbose:
+                n_tightened = ((tight_lower > self.pose_lower).sum() + (tight_upper < self.pose_upper).sum()).item()
+                print(f"  Tight DOF limits: margin=±{np.degrees(margin):.0f}° (tightened DOFs)")
+
+        # Fix H: Adaptive pelvis rotation limit (only DOF 2)
+        # Set pelvis_rot limit to [median - margin, median + margin]
+        # Auto mode: only apply when q_ref pelvis_rot median is outside default ±90° limit
+        apply_adaptive = getattr(self.config, 'use_adaptive_pelvis_limit', False)
+        if getattr(self.config, 'auto_adaptive_pelvis', False) and self._addb_q_reference is not None:
+            med = self._addb_q_reference[:, 2].median().item()
+            # Apply adaptive only when median is outside the default ±45° zone
+            # (i.e., subject walks at an angle, prone to oscillation)
+            if abs(med) > 0.785:  # > 45°
+                apply_adaptive = True
+        if apply_adaptive and self._addb_q_reference is not None:
+            margin = getattr(self.config, 'adaptive_pelvis_margin_rad', 0.785)  # default ±45°
+            pelvis_rot_median = self._addb_q_reference[:, 2].median().item()
+            self.pose_lower[2] = pelvis_rot_median - margin
+            self.pose_upper[2] = pelvis_rot_median + margin
+            initial_poses = clamp_poses(initial_poses, self.pose_lower, self.pose_upper)
+            if verbose:
+                print(f"  Adaptive pelvis limit: [{np.degrees(pelvis_rot_median - margin):.1f}°, "
+                      f"{np.degrees(pelvis_rot_median + margin):.1f}°] "
+                      f"(median={np.degrees(pelvis_rot_median):.1f}°, margin=±{np.degrees(margin):.0f}°)")
+
         # Make betas a parameter for Stage 2
         betas = betas.clone()
 
@@ -1358,6 +1399,11 @@ class PoseOptimizer:
                 )
 
                 loss.backward()
+
+                # Fix B: zero out gradients for pelvis DOFs before step
+                if getattr(self.config, 'freeze_pelvis_in_phaseA', False):
+                    poses.grad.data[:, :3] = 0.0
+
                 optimizer_phaseA.step()
 
                 # Enforce anatomical limits even in Phase A to prevent wrapping
@@ -2090,6 +2136,252 @@ class PoseOptimizer:
             errors[ADDB_JOINTS[addb_idx]] = error
 
         return errors
+
+    def optimize_sequence_sequential(
+        self,
+        addb_joints: torch.Tensor,
+        betas: torch.Tensor,
+        verbose: bool = False,
+        addb_poses: Optional[np.ndarray] = None,
+        dJ: Optional[torch.Tensor] = None,
+        skel_q_reference: Optional[np.ndarray] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        Frame-by-frame sequential optimization with warm start.
+
+        Each frame is initialized from the previous frame's result,
+        ensuring rotation continuity (prevents pelvis rotation oscillation).
+
+        Args:
+            addb_joints: [T, 20, 3] in meters.
+            betas: [10].
+            skel_q_reference: [T, 46] direct SKEL DOF reference.
+        """
+        T = addb_joints.shape[0]
+        n_iters = self.config.sequential_iters
+
+        self._dJ = dJ.detach() if dJ is not None else None
+
+        # Override pose_iters for single-frame calls
+        orig_pose_iters = self.config.pose_iters
+        self.config.pose_iters = n_iters
+
+        if verbose:
+            print(f"Sequential optimization: {T} frames × {n_iters} iters/frame")
+
+        # Initialize from q_ref or zeros
+        if skel_q_reference is not None and len(skel_q_reference) >= T:
+            q_ref = torch.from_numpy(np.array(skel_q_reference[:T])).float().to(self.device)
+        else:
+            q_ref = None
+
+        # Compute pelvis offset for translation init
+        with torch.no_grad():
+            poses_zero = torch.zeros(1, SKEL_NUM_POSE_DOF, device=self.device)
+            trans_zero = torch.zeros(1, 3, device=self.device)
+            _, joints_zero, _ = self.skel.forward(
+                betas.unsqueeze(0), poses_zero, trans_zero
+            )
+            pelvis_offset = joints_zero[0, 0]
+
+        all_poses = torch.zeros(T, SKEL_NUM_POSE_DOF, device=self.device)
+        all_trans = torch.zeros(T, 3, device=self.device)
+
+        pbar = tqdm(range(T), disable=not verbose, desc="Sequential")
+        for t in pbar:
+            # Determine initial pose for this frame
+            if t == 0:
+                if q_ref is not None:
+                    init_pose = q_ref[0].clone()
+                else:
+                    init_pose = torch.zeros(SKEL_NUM_POSE_DOF, device=self.device)
+            else:
+                init_pose = all_poses[t - 1].clone()
+
+            # Initial translation: align pelvis
+            init_trans = addb_joints[t, 0, :].clone() - pelvis_offset
+
+            # Run single-frame optimization
+            pose_t, trans_t, stats_t = self.optimize_single_frame(
+                addb_joints[t:t + 1],
+                betas,
+                initial_poses=init_pose,
+                initial_trans=init_trans,
+                verbose=False,
+            )
+
+            all_poses[t] = pose_t
+            all_trans[t] = trans_t
+
+            if verbose and (t % 50 == 0 or t == T - 1):
+                pbar.set_postfix({'mpjpe': f"{stats_t['mpjpe_mm']:.1f}mm"})
+
+        # Restore original pose_iters
+        self.config.pose_iters = orig_pose_iters
+
+        # Final statistics
+        with torch.no_grad():
+            skel_verts, skel_joints, _ = self.skel.forward(
+                betas.unsqueeze(0).expand(T, -1), all_poses, all_trans, dJ=self._dJ
+            )
+            mpjpe = self._compute_mpjpe(skel_joints, addb_joints)
+            per_joint_error = self._compute_per_joint_error(skel_joints, addb_joints)
+
+        stats = {
+            'final_loss': 0.0,
+            'mpjpe_mm': mpjpe,
+            'per_joint_error_mm': per_joint_error,
+            'scapula_dofs': self.scapula_handler.get_scapula_dof_values(all_poses.mean(dim=0)),
+            'final_betas': betas.clone(),
+            'twist_stats': {'n_suspicious_frames': 0, 'total_frames': T, 'suspicious_frame_indices': []},
+            'marker_stats': {},
+        }
+
+        if verbose:
+            print(f"  Sequential complete: MPJPE = {mpjpe:.1f} mm")
+
+        return all_poses, all_trans, stats
+
+    def optimize_sequence_sliding(
+        self,
+        addb_joints: torch.Tensor,
+        betas: torch.Tensor,
+        verbose: bool = False,
+        addb_poses: Optional[np.ndarray] = None,
+        dJ: Optional[torch.Tensor] = None,
+        skel_q_reference: Optional[np.ndarray] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        Sliding window optimization with temporal loss within windows
+        and warm start between windows.
+
+        Window n+1 is initialized from window n's overlapping results,
+        ensuring rotation continuity while maintaining temporal smoothness.
+
+        Args:
+            addb_joints: [T, 20, 3] in meters.
+            betas: [10].
+            skel_q_reference: [T, 46] direct SKEL DOF reference.
+        """
+        T = addb_joints.shape[0]
+        W = self.config.window_size
+        S = self.config.window_stride
+        blend = self.config.window_blend_frames
+
+        self._dJ = dJ.detach() if dJ is not None else None
+
+        if verbose:
+            n_windows = max(1, (T - W) // S + 1) + (1 if (T - W) % S > 0 else 0)
+            print(f"Sliding window optimization: {T} frames, W={W}, S={S}, blend={blend}")
+            print(f"  ~{n_windows} windows")
+
+        all_poses = torch.zeros(T, SKEL_NUM_POSE_DOF, device=self.device)
+        all_trans = torch.zeros(T, 3, device=self.device)
+        processed = torch.zeros(T, dtype=torch.bool, device=self.device)
+
+        window_idx = 0
+        start = 0
+        while start < T:
+            end = min(start + W, T)
+            window_T = end - start
+
+            # Prepare q_ref for this window
+            window_q_ref = None
+            if skel_q_reference is not None:
+                window_q_ref = skel_q_reference[start:end]
+
+            # Warm start: if we have results from previous window, use them
+            if start > 0 and processed[start].item():
+                # Override q_ref init with previous window's results for overlap zone
+                if window_q_ref is not None:
+                    window_q_ref = np.array(window_q_ref)  # ensure numpy
+                    overlap = min(W - S, window_T)
+                    prev_poses_np = all_poses[start:start + overlap].cpu().numpy()
+                    window_q_ref[:overlap] = prev_poses_np
+
+            # Prepare window-local addb_poses
+            window_addb_poses = None
+            if addb_poses is not None:
+                window_addb_poses = addb_poses[start:end]
+
+            # Create a fresh optimizer with same config for this window
+            # (resets internal state like q_reference)
+            window_optimizer = PoseOptimizer(
+                self.skel, self.config, marker_handler=self.marker_handler
+            )
+
+            # Run batch optimization for this window
+            window_poses, window_trans, window_stats = window_optimizer.optimize_sequence(
+                addb_joints[start:end],
+                betas,
+                use_temporal=True,
+                verbose=False,
+                addb_poses=window_addb_poses,
+                dJ=dJ,
+                skel_q_reference=window_q_ref,
+            )
+
+            # Blend with previous results in overlap zone
+            if start > 0 and processed[start].item():
+                blend_zone = min(blend, end - start)
+                if blend_zone > 0:
+                    alpha = torch.linspace(0.0, 1.0, blend_zone, device=self.device).unsqueeze(1)
+                    all_poses[start:start + blend_zone] = (
+                        (1.0 - alpha) * all_poses[start:start + blend_zone] +
+                        alpha * window_poses[:blend_zone]
+                    )
+                    all_trans[start:start + blend_zone] = (
+                        (1.0 - alpha) * all_trans[start:start + blend_zone] +
+                        alpha * window_trans[:blend_zone]
+                    )
+                    # Non-overlap part
+                    if blend_zone < window_T:
+                        all_poses[start + blend_zone:end] = window_poses[blend_zone:]
+                        all_trans[start + blend_zone:end] = window_trans[blend_zone:]
+                else:
+                    all_poses[start:end] = window_poses
+                    all_trans[start:end] = window_trans
+            else:
+                all_poses[start:end] = window_poses
+                all_trans[start:end] = window_trans
+
+            processed[start:end] = True
+
+            if verbose:
+                print(f"  Window {window_idx}: frames [{start},{end}) MPJPE={window_stats['mpjpe_mm']:.1f}mm")
+
+            window_idx += 1
+            start += S
+
+            # Handle last partial window
+            if start < T and start + S >= T and end < T:
+                start = max(T - W, start)  # ensure we cover the tail
+
+        # Update betas from last window
+        final_betas = betas.clone()
+
+        # Final statistics
+        with torch.no_grad():
+            skel_verts, skel_joints, _ = self.skel.forward(
+                final_betas.unsqueeze(0).expand(T, -1), all_poses, all_trans, dJ=self._dJ
+            )
+            mpjpe = self._compute_mpjpe(skel_joints, addb_joints)
+            per_joint_error = self._compute_per_joint_error(skel_joints, addb_joints)
+
+        stats = {
+            'final_loss': 0.0,
+            'mpjpe_mm': mpjpe,
+            'per_joint_error_mm': per_joint_error,
+            'scapula_dofs': self.scapula_handler.get_scapula_dof_values(all_poses.mean(dim=0)),
+            'final_betas': final_betas,
+            'twist_stats': {'n_suspicious_frames': 0, 'total_frames': T, 'suspicious_frame_indices': []},
+            'marker_stats': {},
+        }
+
+        if verbose:
+            print(f"  Sliding window complete: MPJPE = {mpjpe:.1f} mm ({window_idx} windows)")
+
+        return all_poses, all_trans, stats
 
 
 def optimize_poses(

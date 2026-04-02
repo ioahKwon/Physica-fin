@@ -39,7 +39,7 @@ class SKELInterface:
     def __init__(
         self,
         model_path: str = SKEL_MODEL_PATH,
-        gender: str = 'male',
+        sex: str = 'male',
         device: Optional[torch.device] = None,
     ):
         """
@@ -47,11 +47,11 @@ class SKELInterface:
 
         Args:
             model_path: Path to SKEL model files.
-            gender: 'male' or 'female'.
+            sex: 'male' or 'female'.
             device: Torch device.
         """
         self.model_path = model_path
-        self.gender = gender
+        self.sex = sex
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Load SKEL model
@@ -64,7 +64,7 @@ class SKELInterface:
         """Load the SKEL model."""
         self.model = SKEL(
             model_path=self.model_path,
-            gender=self.gender,
+            gender=self.sex,
         ).to(self.device)
 
         # Set model to evaluation mode
@@ -320,18 +320,18 @@ class SKELInterface:
         return SKEL_JOINTS
 
     def __repr__(self) -> str:
-        return f"SKELInterface(gender={self.gender}, device={self.device})"
+        return f"SKELInterface(sex={self.sex}, device={self.device})"
 
 
 def create_skel_interface(
-    gender: str = 'male',
+    sex: str = 'male',
     device: Optional[str] = None,
 ) -> SKELInterface:
     """
     Factory function to create SKEL interface.
 
     Args:
-        gender: 'male' or 'female'.
+        sex: 'male' or 'female'. Selects SKEL body model.
         device: 'cuda' or 'cpu'. Auto-detect if None.
 
     Returns:
@@ -344,6 +344,6 @@ def create_skel_interface(
     from . import config as _cfg
     return SKELInterface(
         model_path=_cfg.SKEL_MODEL_PATH,
-        gender=gender,
+        sex=sex,
         device=torch.device(device),
     )

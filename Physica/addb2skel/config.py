@@ -148,14 +148,14 @@ class OptimizationConfig:
 
     # Loss weights (tuned based on compare_smpl_skel.py)
     weight_joint: float = 1.0
-    weight_bone_dir: float = 0.3    # 0.5 → 0.3
+    weight_bone_dir: float = 0.0    # DISABLED — PROXY joints (acromial) in bone pairs cause issues
     weight_bone_len: float = 1.0    # 0.3 → 1.0 (critical!)
     weight_shoulder: float = 1.0
-    weight_width: float = 10.0      # 0.5 → 10.0 (critical! matches working code)
+    weight_width: float = 2.0       # L/R acromial distance — low weight to prevent narrow shoulders without over-abducting scapula
     weight_pose_reg: float = 0.01   # Keep original — increasing degrades MPJPE significantly
-    weight_spine_reg: float = 0.1   # 0.05 → 0.1
+    weight_spine_reg: float = 0.3   # 0.1 → 0.3 (prevents thorax over-extension when spine markers absent)
     weight_arm_reg: float = 0.0     # Arm DOFs (elbow/wrist) regularization — disabled by default
-    weight_scapula_reg: float = 0.05  # 0.1 → 0.05
+    weight_scapula_reg: float = 0.05  # Scapula DOF regularization (anatomical prior, keeps shoulder neutral)
     weight_temporal: float = 0.01   # Keep original — increasing degrades MPJPE significantly
     weight_acceleration: float = 0.1  # 2nd-order (acceleration) smoothness regularization
     adaptive_temporal: bool = False   # If True, normalize temporal loss by dt (dt-adaptive smoothing)
@@ -176,6 +176,21 @@ class OptimizationConfig:
     two_pass_iters: int = 20           # iterations per pass (short probe)
     # R_align for rotation matrix mapping: R_90_Y (90° Y) vs R_FLIP_XZ (180° Y = X,Z flip)
     use_r_flip_xz: bool = False        # True: use 180° Y (matches joint X,Z flip), False: use 90° Y (verified best)
+
+    # --- Sequential / Sliding Window optimization ---
+    use_sequential: bool = False       # Frame-by-frame with warm start from previous frame
+    sequential_iters: int = 100        # Per-frame iterations (warm start → fewer needed)
+    use_sliding_window: bool = False   # Sliding window batch optimization
+    window_size: int = 50              # Frames per window
+    window_stride: int = 25            # Stride between windows (overlap = window_size - stride)
+    window_blend_frames: int = 10      # Linear blending zone at window boundaries
+    freeze_pelvis_in_phaseA: bool = False  # Fix B: freeze pelvis DOFs (0-2) during Phase A direction-first
+    use_tight_dof_limits: bool = False     # Fix D: tighten DOF limits around q_reference ± margin
+    tight_dof_margin_rad: float = 0.5      # Margin in radians (~29°) around q_ref for tight limits
+    pelvis_rotation_unlimited: bool = False # Fix F: remove pelvis_rotation limit (SKEL original has no limit)
+    use_adaptive_pelvis_limit: bool = False # Fix H: set pelvis_rot limit to q_ref_median ± margin
+    adaptive_pelvis_margin_rad: float = 0.785  # ±45° default
+    auto_adaptive_pelvis: bool = False  # Auto-detect: apply adaptive only when q_ref pelvis_rot is outside ±45°
     weight_foot_reg: float = 0.0    # Subtalar/mtp DOF regularization (0=disabled; >0 degrades foot direction)
     weight_foot_height: float = 15.0  # Foot height (Y-axis) loss — GRF critical: aggressive foot fitting
 
@@ -195,8 +210,8 @@ class OptimizationConfig:
     approximate_foot_weight_factor: float = 1.0
 
     # Humerus alignment/regularization weights (extracted from hardcoded values in scapula_handler)
-    weight_humerus_align: float = 0.5    # acromial→elbow direction matching
-    weight_humerus_reg: float = 0.05     # humerus DOF regularization toward zero
+    weight_humerus_align: float = 0.0    # DISABLED — humerus has no DIRECT mapping
+    weight_humerus_reg: float = 0.05     # Humerus DOF regularization (anatomical prior, keeps arm neutral)
 
     # Head marker activation (remove LFHD/RFHD/LBHD/RBHD from blacklist at runtime)
     use_head_markers: bool = False
@@ -253,7 +268,7 @@ class OptimizationConfig:
     # ==========================================================================
 
     # Enable marker position loss (requires markers_map + marker_observations)
-    use_marker_loss: bool = False  # Disabled by default for backward compatibility
+    use_marker_loss: bool = True   # Marker position loss (BSM vertex matching)
     # Upper body marker boost: multiplier for shoulder/elbow/wrist markers in marker loss.
     # Compensates for lack of DIRECT joint matching in upper body (only elbow~hand have direct match).
     upper_body_marker_boost: float = 5.0  # Boost shoulder/elbow/wrist BSM markers (verified optimal)
@@ -268,6 +283,9 @@ class OptimizationConfig:
 
     # Weight for marker loss in scale estimation (Stage 1)
     weight_marker_scale: float = 0.1
+    # Weight for shoulder width matching in scale estimation (Stage 1)
+    # Matches SKEL scapula width to AddB acromial width via betas
+    weight_shoulder_width_in_scale: float = 0.0  # DISABLED — beta distorts body shape to match width
 
     # Use VertexMarkerHandler (SMPL2AddBiomechanics approach) instead of MarkerHandler
     use_vertex_marker_handler: bool = True
@@ -341,9 +359,10 @@ class OptimizationConfig:
     # Weight for marker pairwise distance in beta estimation
     weight_marker_pdist: float = 1.0
 
-    # Position-based marker matching fallback (Tier 3)
-    use_position_based_fallback: bool = True
-    position_fallback_max_dist_mm: float = 50.0
+    # Position-based marker matching fallback (Tier 3) — DISABLED permanently
+    # T3 matches by 3D position proximity, prone to wrong matches → removed
+    use_position_based_fallback: bool = False
+    position_fallback_max_dist_mm: float = 50.0  # unused (T3 disabled)
 
     # AddB body-local offset based vertex matching (Tier 2.5)
     # Uses markers_map (body, osim_offset) → SKEL T-pose nearest vertex
@@ -453,6 +472,7 @@ class ConversionResult:
     virtual_markers: Optional['np.ndarray'] = None  # [T, K, 3] marker trajectories
     virtual_marker_names: Optional[List[str]] = None  # marker names
     marker_quality: Optional[Dict[str, float]] = None  # per-marker error in mm
+    marker_tier_counts: Optional[Dict[int, int]] = None  # {1: N, 2: N, 3: N} tier matching stats
 
     # Foot marker offsets (per-subject correction for structural mismatch)
     foot_marker_offsets: Optional[Dict[str, 'np.ndarray']] = None  # {name: [3] in SKEL coords}
@@ -464,7 +484,7 @@ class ConversionResult:
 
     # Metadata
     num_frames: int = 0
-    gender: str = 'male'
+    sex: str = 'male'
 
     # Evaluation metrics (all 7: MPJPE, W-MPJPE, PA-MPJPE, ACCL, VEL, FS, GP)
     evaluation_metrics: Optional[Dict[str, float]] = None
