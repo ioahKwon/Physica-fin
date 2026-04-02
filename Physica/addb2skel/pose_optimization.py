@@ -2015,13 +2015,17 @@ class PoseOptimizer:
         skel_joints: torch.Tensor,
         addb_joints: torch.Tensor,
     ) -> Dict[str, float]:
-        """Compute per-joint error in mm."""
+        """Compute root-relative per-joint error in mm."""
         from .joint_definitions import ADDB_JOINTS
+
+        # Root-relative: subtract pelvis (index 0 in both mapped lists)
+        pred_root = skel_joints[:, self.skel_indices[0]:self.skel_indices[0]+1, :]
+        target_root = addb_joints[:, self.addb_indices[0]:self.addb_indices[0]+1, :]
 
         errors = {}
         for i, (addb_idx, skel_idx) in enumerate(zip(self.addb_indices, self.skel_indices)):
-            pred = skel_joints[:, skel_idx, :]
-            target = addb_joints[:, addb_idx, :]
+            pred = skel_joints[:, skel_idx, :] - pred_root.squeeze(1)
+            target = addb_joints[:, addb_idx, :] - target_root.squeeze(1)
             error = torch.norm(pred - target, dim=-1).mean().item() * 1000
             errors[ADDB_JOINTS[addb_idx]] = error
 
