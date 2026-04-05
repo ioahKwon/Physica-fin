@@ -168,7 +168,7 @@ def load_skel_data(npz_path, gender, device='cuda', batch_size=10):
     poses = torch.from_numpy(data['poses']).float().to(device)
     trans = torch.from_numpy(data['trans']).float().to(device)
 
-    skel = SKELInterface(gender=gender, device=device)
+    skel = SKELInterface(sex=gender, device=device)
     T = poses.shape[0]
     skin_v_all, skel_v_all, joints_all = [], [], []
 
@@ -230,16 +230,23 @@ def load_b3d_data(b3d_path, num_frames=None):
         tau_raw = np.array(pp.tau, dtype=np.float64)
         tau[t] = tau_raw[:n_dof] if len(tau_raw) >= n_dof else np.pad(tau_raw, (0, n_dof - len(tau_raw)))
 
-        # GT joint positions from pass 0 (kinematics)
+        # GT joint positions from pass 0 (kinematics).
+        # Apply X/Z flip (pipeline.py:121-123 convention): AddB has X/Z flipped relative
+        # to SKEL frame. The flip aligns relative bone directions, but shifts the world
+        # origin — caller should shift all to match SKEL pelvis position (done post-hoc).
         pp0 = frame.processingPasses[0]
         jc_raw = np.array(pp0.jointCenters, dtype=np.float64)
         n_jc = len(jc_raw) // 3
-        gt_joints_all.append(jc_raw[:n_jc * 3].reshape(n_jc, 3))
+        jc = jc_raw[:n_jc * 3].reshape(n_jc, 3)
+        jc[:, 0] = -jc[:, 0]; jc[:, 2] = -jc[:, 2]
+        gt_joints_all.append(jc)
 
-        # GRF data
+        # GRF: flip X/Z for both CoP (position) and force vector
         contact = np.array(pp.contact)
         grf = np.array(pp.groundContactForce).reshape(-1, 3)
         cop = np.array(pp.groundContactCenterOfPressure).reshape(-1, 3)
+        grf[:, 0] = -grf[:, 0]; grf[:, 2] = -grf[:, 2]
+        cop[:, 0] = -cop[:, 0]; cop[:, 2] = -cop[:, 2]
         grf_data.append((contact, grf, cop))
 
         # Markers
@@ -607,7 +614,12 @@ def compute_camera(skel_data, frame_indices, size=768, focal=5000):
     gc = all_skin.mean(axis=0)
     ac = all_skin - gc
     ac[:, 1] *= -1
-    tz = focal * (ac[:, 1].max() - ac[:, 1].min()) / (size * 0.80)
+    # Use max of X extent (horizontal walking spread) and Y extent (height) for zoom
+    # so all 4 frames fit horizontally
+    y_extent = ac[:, 1].max() - ac[:, 1].min()
+    x_extent = ac[:, 0].max() - ac[:, 0].min()
+    max_extent = max(y_extent, x_extent)
+    tz = focal * max_extent / (size * 0.80)
     cam_t = np.array([0.0, 0.0, tz])
     K4 = [focal, focal, size // 2, size // 2]
     return cam_t, K4, gc
@@ -1007,6 +1019,31 @@ def render_subject(
 # Convenience: render from file paths
 # ===========================================================================
 
+def _align_addb_to_skel_pelvis_v2(skel_data):
+    """Shift AddB joints and CoP by per-frame shift = SKEL_pelvis - AddB_pelvis."""
+    if 'gt_joints' not in skel_data or skel_data['gt_joints'] is None:
+        return
+    skel_j = skel_data.get('joints')
+    if skel_j is None:
+        return
+    if hasattr(skel_j, 'numpy'):
+        skel_j = skel_j.numpy()
+    gt = skel_data['gt_joints']
+    T = min(len(gt), len(skel_j))
+    shifts = skel_j[:T, 0] - gt[:T, 0]  # [T, 3]
+    # Apply to gt joints
+    skel_data['gt_joints'] = gt[:T] + shifts[:, None, :]  # broadcast over joints
+    # Apply to CoP
+    grf_data = skel_data.get('grf_data')
+    if grf_data is not None:
+        new_grf = []
+        for t in range(min(len(grf_data), T)):
+            contact, grf, cop = grf_data[t]
+            cop_shifted = cop + shifts[t][None, :]  # broadcast over contacts
+            new_grf.append((contact, grf, cop_shifted))
+        skel_data['grf_data'] = new_grf
+
+
 def render_from_paths(
     npz_path,
     b3d_path,
@@ -1042,6 +1079,9 @@ def render_from_paths(
         b3d_data = load_b3d_data(b3d_path, num_frames=T)
         skel_data.update(b3d_data)
         print(f"  Torque: {b3d_data['tau'].shape}, GT joints: {b3d_data['gt_joints'].shape}")
+        # Align AddB pelvis to SKEL pelvis per-frame (post-flip coord alignment)
+        _align_addb_to_skel_pelvis_v2(skel_data)
+        print(f"  AddB aligned to SKEL pelvis frame")
     else:
         if 'torque' in panels:
             print("  Warning: no b3d file, torque panel will show plain bone mesh")
